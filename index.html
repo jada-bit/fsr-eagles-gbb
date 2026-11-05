@@ -123,8 +123,21 @@
         .court-area { width: 100%; max-width: 440px; margin: 0 auto; aspect-ratio: 500 / 440; container-type: size; display: flex; align-items: center; justify-content: center; }
         .court-box { width: min(100cqw, calc(100cqh * 500 / 440)); }
         .shot-list { overflow-y: auto; }
-        @media (min-width: 768px) {
-            .live-grid { display: grid; grid-template-columns: minmax(190px, 1fr) minmax(0, 2fr) minmax(230px, 1.4fr); flex: 1; min-height: 0; }
+        /* CHANGED: iPad live game. Slim scoreboard and stat bar, and the court gets most of the screen.
+           Landscape: plays | big court | buttons. Portrait: big court across the top, plays and buttons below. */
+        @media (min-width: 700px) {
+            .live-header { padding: 6px 14px; gap: 12px; }
+            .score-box.us, .score-box.them { display: flex; align-items: center; justify-content: center; gap: 16px; }
+            .score-box.them .opp-meta { min-width: 0; width: 210px; }
+            .score-val { font-size: 2.5rem; }
+            .score-box .timeout-pills { margin-top: 2px; }
+            .to-pill { width: 32px; height: 32px; }
+            .coach-hud { padding: 6px 8px; }
+            .hud-box { padding: 3px 6px; }
+            .hud-label { font-size: 10px; }
+            .hud-val { font-size: 18px; line-height: 1.15; }
+            .q-btn { padding: 8px 4px; }
+            .live-grid { display: grid; grid-template-columns: minmax(170px, 0.8fr) minmax(0, 2.6fr) minmax(220px, 1.2fr); flex: 1; min-height: 0; }
             .live-col { min-height: 0; }
             .live-col .event-feed { flex: 1; height: auto; min-height: 0; }
             .shot-panel { flex: 1; min-height: 0; }
@@ -133,6 +146,10 @@
             .keypad .keypad-row { flex: 1; min-height: 44px; }
             .keypad .opp-pad { flex: 2; min-height: 0; }
             .keypad .opp-pad .keypad-row { flex: 1; }
+        }
+        @media (min-width: 700px) and (orientation: portrait) {
+            .live-grid { grid-template-columns: minmax(0, 1fr) minmax(0, 1.3fr); grid-template-rows: minmax(0, 1.8fr) minmax(0, 1fr); grid-template-areas: "court court" "feed keys"; }
+            .col-court { grid-area: court; } .col-feed { grid-area: feed; } .col-keys { grid-area: keys; }
         }
         .event-item { background: #222; border: 1px solid #333; padding: 10px 12px; border-radius: 8px; font-size: 15px; display: flex; justify-content: space-between; align-items: center; animation: slideInLeft 0.2s; cursor: pointer; border-left: 4px solid var(--gold); min-height: 50px; }
         .event-item:hover { background: #333; border-color: #555; }
@@ -1709,7 +1726,7 @@
                 if (view !== 'live') return;
                 const measure = () => {
                     const el = liveRef.current; if (!el) return;
-                    if (window.innerWidth < 768) { setLiveHeight(null); return; }
+                    if (window.innerWidth < 700) { setLiveHeight(null); return; }
                     const top = el.getBoundingClientRect().top + window.scrollY;
                     setLiveHeight(Math.max(460, window.innerHeight - top - 8));
                 };
@@ -1762,13 +1779,14 @@
             const scoutNotesForOpp = scoutOppKey && scoutReports[scoutOppKey] ? [...scoutReports[scoutOppKey].notes].sort((a,b)=>new Date(b.date)-new Date(a.date)) : [];
 
             return (
-                <div className={`${view === 'live' ? 'pb-2' : 'pb-24'} max-w-7xl mx-auto p-4`}>
+                <div className={`${view === 'live' ? 'pb-2 p-2 md:px-3' : 'pb-24 p-4'} max-w-7xl mx-auto`}>
                     <div className="toast-container">{toasts.map(t => <div key={t.id} className={`toast toast-${t.type}`}>{t.msg}</div>)}</div>
 
-                    <div className="flex flex-col md:flex-row justify-between items-center mb-4 bg-zinc-900 p-4 rounded-xl border border-white/10 sticky top-2 z-50 shadow-xl no-print">
-                        <div className="flex items-center gap-3 mb-4 md:mb-0">
-                            <img src={EAGLE_LOGO} alt="Eagles" style={{ height: 40, width: "auto" }} /><h1 className="text-xl font-black italic uppercase">Eagles <span className="text-gold">Analytics</span></h1>
-                            {authReady && (isEditor ? (
+                    {/* CHANGED: on the live game the top bar shrinks to one slim row (logo, menus, Varsity/JV) so the court gets the room */}
+                    <div className={`flex justify-between items-center bg-zinc-900 rounded-xl border border-white/10 sticky top-2 z-50 shadow-xl no-print ${view === 'live' ? 'flex-row gap-3 px-2 py-1.5 mb-2' : 'flex-col md:flex-row p-4 mb-4'}`}>
+                        <div className={`flex items-center gap-3 ${view === 'live' ? '' : 'mb-4 md:mb-0'}`}>
+                            <img src={EAGLE_LOGO} alt="Eagles" style={{ height: view === 'live' ? 32 : 40, width: "auto" }} />{view !== 'live' && <h1 className="text-xl font-black italic uppercase">Eagles <span className="text-gold">Analytics</span></h1>}
+                            {view !== 'live' && authReady && (isEditor ? (
                                 <span className="flex items-center gap-2 bg-green-900/30 border border-green-700 text-green-300 text-[10px] font-black uppercase px-2 py-1 rounded-full"><Icon name="pencil" className="mr-1.5" />Editing as {currentUser.email}</span>
                             ) : currentUser ? (
                                 <span className="flex items-center gap-2 bg-zinc-800 border border-zinc-700 text-zinc-400 text-[10px] font-black uppercase px-2 py-1 rounded-full"><Icon name="eye" className="mr-1.5" />View Only</span>
@@ -1776,20 +1794,26 @@
                                 <button onClick={()=>setShowSignIn(true)} className="bg-blue-700 hover:bg-blue-600 text-white text-[10px] font-black uppercase px-3 py-1.5 rounded-full"><Icon name="lock" className="mr-1.5" />Sign In To Edit</button>
                             ))}
                             {!isOnline && <span className="bg-orange-900/40 border border-orange-600 text-orange-300 text-[10px] font-black uppercase px-2 py-1 rounded-full">Offline. Stats save on this iPad</span>}
-                            {currentUser && !statKeeperMode && <button onClick={signOutUser} className="text-[10px] font-bold text-zinc-500 hover:text-white uppercase underline">Sign Out</button>}
+                            {view === 'live' && (
+                                <div className="flex gap-1 bg-black border border-zinc-800 rounded-full p-0.5">
+                                    <button onClick={()=>requestTeamSwitch('varsity')} className={`nav-btn ${activeTeam==='varsity'?'active-nav':'inactive-nav'}`} style={{padding:'6px 12px'}}>Varsity</button>
+                                    <button onClick={()=>requestTeamSwitch('jv')} className={`nav-btn ${activeTeam==='jv'?'active-nav':'inactive-nav'}`} style={{padding:'6px 12px'}}>JV</button>
+                                </div>
+                            )}
+                            {view !== 'live' && currentUser && !statKeeperMode && <button onClick={signOutUser} className="text-[10px] font-bold text-zinc-500 hover:text-white uppercase underline">Sign Out</button>}
                         </div>
-                        <nav className="flex flex-col gap-1 w-full md:w-auto">
+                        <nav className={`flex gap-1 ${view === 'live' ? 'flex-col lg:flex-row lg:items-center min-w-0' : 'flex-col w-full md:w-auto'}`}>
                             {keeperOnly ? (
                                 <div className="flex gap-1 overflow-x-auto pb-1 no-scrollbar items-center">
-                                    {STAT_KEEPER_TABS.map(t => (<button key={t} onClick={()=>setView(t)} className={`nav-btn ${view===t?'active-nav':'inactive-nav'}`}>{TAB_LABELS[t]}</button>))}
+                                    {STAT_KEEPER_TABS.map(t => (<button key={t} onClick={()=>setView(t)} className={`nav-btn ${view===t?'active-nav':'inactive-nav'}`} style={view === 'live' ? {padding:'7px 12px'} : undefined}>{TAB_LABELS[t]}</button>))}
                                     {!isStatKeeperAccount && <button onClick={exitStatKeeperMode} className="nav-btn inactive-nav">Exit stat keeper mode</button>}
                                 </div>
                             ) : (
                                 <>
                                     <div className="flex gap-1 overflow-x-auto pb-1 no-scrollbar items-center">
-                                        {NAV_GROUPS.filter(g => g.name !== 'Settings').map(g => (<button key={g.name} onClick={()=>setView(g.tabs[0])} className={`nav-btn ${activeGroup.name===g.name?'active-nav':'inactive-nav'}`}>{g.name}</button>))}
-                                        {isAdmin && <button onClick={enterStatKeeperMode} className="nav-btn inactive-nav">Stat keeper mode</button>}
-                                        {isAdmin && <button onClick={()=>setView('admin')} title="Roster, backups, and season setup" className={`nav-btn ${view==='admin'?'active-nav':'inactive-nav'}`}><Icon name="settings" className="mr-1.5" />Settings</button>}
+                                        {NAV_GROUPS.filter(g => g.name !== 'Settings').map(g => (<button key={g.name} onClick={()=>setView(g.tabs[0])} className={`nav-btn ${activeGroup.name===g.name?'active-nav':'inactive-nav'}`} style={view === 'live' ? {padding:'7px 12px'} : undefined}>{g.name}</button>))}
+                                        {isAdmin && <button onClick={enterStatKeeperMode} className="nav-btn inactive-nav" style={view === 'live' ? {padding:'7px 12px'} : undefined}>Stat keeper mode</button>}
+                                        {isAdmin && <button onClick={()=>setView('admin')} title="Roster, backups, and season setup" className={`nav-btn ${view==='admin'?'active-nav':'inactive-nav'}`} style={view === 'live' ? {padding:'7px 12px'} : undefined}><Icon name="settings" className="mr-1.5" />Settings</button>}
                                     </div>
                                     {activeGroup.tabs.length > 1 && (
                                         <div className="flex gap-1 overflow-x-auto pb-1 no-scrollbar">
@@ -1802,7 +1826,7 @@
                     </div>
 
                     {/* NEW: Team + Season switcher. Filters every historical view below. */}
-                    <div className={`flex flex-wrap items-center gap-3 ${view === 'live' ? 'mb-2' : 'mb-6'} no-print`}>
+                    {view !== 'live' && <div className="flex flex-wrap items-center gap-3 mb-6 no-print">
                         <div className="flex gap-1 bg-zinc-900 border border-zinc-800 rounded-full p-1">
                             <button onClick={()=>requestTeamSwitch('varsity')} className={`nav-btn ${activeTeam==='varsity'?'active-nav':'inactive-nav'}`}>Varsity</button>
                             <button onClick={()=>requestTeamSwitch('jv')} className={`nav-btn ${activeTeam==='jv'?'active-nav':'inactive-nav'}`}>JV</button>
@@ -1811,7 +1835,7 @@
                             {seasonOptions.map(s => <option key={s} value={s}>{s}</option>)}
                         </select>}
                         <span className="text-[10px] font-bold text-zinc-600 uppercase">{visibleGames.length} game{visibleGames.length===1?'':'s'} in this view</span>
-                    </div>
+                    </div>}
 
                     {TEST_MODE && (
                         <div className="mb-4 flex flex-col md:flex-row items-center justify-between gap-3 bg-orange-600 text-black rounded-xl px-4 py-3 no-print">
@@ -1861,20 +1885,20 @@
                                 </div>
                             )}
                             <div className="live-header">
-                                <div className="score-box"><div className="score-label">EAGLES</div><div className="score-val text-gold">{getTeamScore()}</div>
-                                    <div className="text-[10px] text-zinc-500 font-bold text-center mt-1">Timeouts left (60 sec / 30 sec)</div>
+                                <div className="score-box us"><div><div className="score-label">EAGLES</div><div className="score-val text-gold">{getTeamScore()}</div></div>
+                                    <div><div className="text-[10px] text-zinc-500 font-bold text-center mt-1">Timeouts left (60 / 30)</div>
                                     <div className="timeout-pills">
                                         {timeouts.full.map((t,i)=><div key={`f-${i}`} onClick={()=>toggleTimeout('full',i)} className={`to-pill ${t?'active':'used'}`}>60</div>)}
                                         {timeouts.thirty.map((t,i)=><div key={`30-${i}`} onClick={()=>toggleTimeout('thirty',i)} className={`to-pill ${t?'active':'used'}`}>30</div>)}
-                                    </div>
+                                    </div></div>
                                 </div>
-                                <div className="flex flex-col items-center gap-1"><div onClick={togglePossession} className="poss-arrow text-white"><Icon name={possession==='home'?'arrowLeft':'arrowRight'} size={36} className="text-gold" label={possession==='home'?'Our ball':'Their ball'} /></div><div className="text-zinc-500 font-black text-xs text-center leading-tight">Possession<br/>arrow</div></div>
-                                <div className="score-box"><div className="flex justify-center mb-1"><div className="score-val text-white" title="Opponent points come from logged baskets and free throws, so every point can be undone">{gameMeta.oppScore}</div></div><input list="opp-suggestions" value={gameMeta.opp} onChange={e=>setGameMeta({...gameMeta, opp:e.target.value})} aria-label="Opponent" className={`text-center score-label w-full outline-none rounded-md py-1 ${(gameMeta.opp||'').trim() ? 'bg-transparent border border-transparent' : 'bg-black border border-dashed border-gold text-gold placeholder-yellow-600'}`} placeholder="Tap to add opponent"/>
+                                <div className="flex flex-col items-center gap-1"><div onClick={togglePossession} className="poss-arrow text-white"><Icon name={possession==='home'?'arrowLeft':'arrowRight'} size={32} className="text-gold" label={possession==='home'?'Our ball':'Their ball'} /></div><div className="text-zinc-500 font-black text-xs text-center leading-tight">Possession</div></div>
+                                <div className="score-box them"><div className="score-val text-white" title="Opponent points come from logged baskets and free throws, so every point can be undone">{gameMeta.oppScore}</div><div className="opp-meta"><input list="opp-suggestions" value={gameMeta.opp} onChange={e=>setGameMeta({...gameMeta, opp:e.target.value})} aria-label="Opponent" className={`text-center score-label w-full outline-none rounded-md py-1 ${(gameMeta.opp||'').trim() ? 'bg-transparent border border-transparent' : 'bg-black border border-dashed border-gold text-gold placeholder-yellow-600'}`} placeholder="Tap to add opponent"/>
                                     <div className="flex justify-center items-center gap-2 mt-1">
                                         <button onClick={()=>setGameMeta(prev=>({ ...prev, venue: prev.venue === 'Home' ? 'Away' : 'Home' }))} title="Tap to switch Home or Away" className="px-3 py-1 rounded-full bg-zinc-800 border border-zinc-700 text-zinc-200 text-[11px] font-black uppercase">{gameMeta.venue || 'Home'}</button>
                                         {(gameMeta.opp||'').trim() && isScrimGame({ date: gameMeta.date, opp: gameMeta.opp }) && <span className="px-2 py-1 rounded-full bg-zinc-800 text-zinc-400 text-[11px] font-black uppercase">Scrimmage</span>}
                                     </div>
-                                </div>
+                                </div></div>
                             </div>
                             
                             {/* NEW: "?" help screen. Tap anywhere to close. */}
@@ -1961,7 +1985,7 @@
 
                             <div className="live-grid">
                                 {/* Column 1: the play-by-play feed (tap to undo), then save/reset */}
-                                <div className="live-col">
+                                <div className="live-col col-feed">
                                     <div className="feed-title">Recent plays<span>tap one to undo</span></div>
                                     <div className="event-feed">
                                         {eventLog.length === 0 && (
@@ -1986,12 +2010,12 @@
                                 </div>
 
                                 {/* Column 2: the court (shots for both teams) */}
-                                <div className="live-col">
+                                <div className="live-col col-court">
                                     <ShotChartPanel firstShot={shotLog.length === 0} activePlayers={activePlayers} onCommit={logShot} onRebound={logRebound} onAssist={logAssist} onOpponentCommit={logOpponentShot} onOpponentRebound={() => logOpponentAction('reb')} />
                                 </div>
 
                                 {/* Column 3: everything else, ours on top, theirs in red */}
-                                <div className="live-col keypad">
+                                <div className="live-col keypad col-keys">
                                     <div className="keypad-row"><button onClick={() => startAction('ftm', 1, 'FT made')} className="kb-stat-btn bg-make" style={{minHeight:'48px'}}>FT MADE (+1)</button><button onClick={() => startAction('fta', 0, 'FT missed')} className="kb-stat-btn bg-miss" style={{minHeight:'48px'}}>FT MISSED</button></div>
                                     <div className="keypad-row"><button onClick={() => startAction('reb', 0, 'Rebound')} className="kb-stat-btn bg-action" style={{minHeight:'48px'}}>REBOUND</button><button onClick={() => startAction('ast', 0, 'Assist')} className="kb-stat-btn bg-action" style={{minHeight:'48px'}}>ASSIST</button><button onClick={() => startAction('stl', 0, 'Steal')} className="kb-stat-btn bg-action" style={{minHeight:'48px'}}>STEAL</button></div>
                                     <div className="keypad-row"><button onClick={() => startAction('blk', 0, 'Block')} className="kb-stat-btn bg-action" style={{minHeight:'48px'}}>BLOCK</button><button onClick={() => startAction('to', 0, 'Turnover')} className="kb-stat-btn bg-neg" style={{minHeight:'48px'}}>TURNOVER</button><button onClick={() => startAction('pf', 0, 'Foul')} className="kb-stat-btn bg-neg" style={{minHeight:'48px'}}>FOUL</button></div>
@@ -2531,23 +2555,38 @@
                                         <p>1. In the Firebase console for this project, turn on <span className="text-white">Authentication → Sign-in method → Email/Password</span>.</p>
                                         <p>2. Still in Authentication, go to the <span className="text-white">Users</span> tab and click <span className="text-white">Add user</span> for each coach/stat-keeper — enter their email and set a password (they can change it later; see "Forgot password?" on the sign-in screen).</p>
                                         <p>3. In the code, find <code className="bg-black px-1 rounded">ALLOWED_EDITORS</code> near the top and list those same email addresses, lowercase.</p>
-                                        <p>4. In <span className="text-white">Firestore → Rules</span>, paste rules that only allow writes from those same emails — for example:</p>
+                                        <p>4. In <span className="text-white">Firestore → Rules</span>, paste these rules. Only signed-in coaches can read or change data. Stat keepers can run and save the live game. Anyone else, including the player playbook pages, can read published plays and nothing else.</p>
                                         <pre className="bg-black p-2 rounded overflow-x-auto text-[10px] leading-tight whitespace-pre">{`rules_version = '2';
 service cloud.firestore {
   match /databases/{db}/documents {
-    function isEditor() {
-      return request.auth != null &&
-        request.auth.token.email in [
-          "coach@gmail.com"
-        ];
+    // Coaches: same emails as ALLOWED_EDITORS in the code
+    function isCoach() {
+      return request.auth != null && request.auth.token.email in [
+        "jada.alim@gmail.com",
+        "jmwhitney03@gmail.com"
+      ];
     }
+    // Stat keepers: same emails as STAT_KEEPER_ACCOUNTS in the code
+    function isKeeper() {
+      return request.auth != null && request.auth.token.email in [
+        "jada.alim+statkeeper@gmail.com"
+      ];
+    }
+    // Coaches can read and change everything
     match /{document=**} {
-      allow read: if true;
-      allow write: if isEditor();
+      allow read, write: if isCoach();
+    }
+    match /{col}/{id} {
+      // Anyone (the player playbook pages) can read published plays, nothing else
+      allow read: if col in ['plays', 'test_plays'] && resource.data.published == true;
+      // Stat keepers run the live game and save it
+      allow read: if isKeeper() && col in ['rosters', 'test_rosters', 'liveGames', 'test_liveGames'];
+      allow write: if isKeeper() && col in ['liveGames', 'test_liveGames'];
+      allow create: if isKeeper() && col in ['games', 'test_games'];
     }
   }
 }`}</pre>
-                                        <p>Keep the email list in the rules identical to <code className="bg-black px-1 rounded">ALLOWED_EDITORS</code> in the code — the code gate is just for a clean UI, the Firestore rule is what actually stops unapproved writes.</p>
+                                        <p>Keep the email lists in the rules identical to <code className="bg-black px-1 rounded">ALLOWED_EDITORS</code> and <code className="bg-black px-1 rounded">STAT_KEEPER_ACCOUNTS</code> in the code. The code only hides buttons. The Firestore rules are what actually protect the data.</p>
                                     </div>
                                 </details>
                             </div>
