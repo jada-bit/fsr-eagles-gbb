@@ -36,6 +36,9 @@
     </script>
     <style>
         :root { --gold: #FFB81C; --black: #050505; --red: #ef4444; --green: #22c55e; --blue: #3b82f6; --zinc: #18181b; }
+        /* NEW: dark native scrollbars and form controls, and no sideways jump when switching tabs */
+        html { color-scheme: dark; scrollbar-gutter: stable; }
+        .no-scrollbar { scrollbar-width: none; } .no-scrollbar::-webkit-scrollbar { display: none; }
         body { background-color: var(--black); color: white; font-family: 'Barlow Condensed', system-ui, -apple-system, sans-serif; -webkit-print-color-adjust: exact; touch-action: manipulation; }
         
         /* UTILS */
@@ -99,7 +102,8 @@
         .bg-make { background: #166534; color: white; }
         .bg-miss { background: #7f1d1d; color: white; }
         .bg-action { background: #1e3a8a; color: white; }
-        .bg-neg { background: #3f3f46; color: #a1a1aa; }
+        /* CHANGED: was gray, which read as disabled. Turnovers and fouls now get their own color. */
+        .bg-neg { background: #b45309; color: white; }
 
         /* EVENT FEED */
         .event-feed { background: #111; border: 1px solid #333; border-radius: 10px; overflow-y: auto; height: 260px; padding: 8px; display: flex; flex-direction: column; gap: 6px; -webkit-overflow-scrolling: touch; }
@@ -324,11 +328,11 @@
         // NEW: navigation grouped into four menus instead of 13 loose tabs. Plain-language labels.
         const NAV_GROUPS = [
             { name: 'Game', tabs: ['live', 'log', 'new'] },
-            { name: 'Team', tabs: ['goals', 'stats', 'trends', 'profiles', 'season report'] },
-            { name: 'Prep', tabs: ['scout', 'playbook', 'practice', 'tactics', 'clipboard', 'ask coach'] },
-            { name: 'Admin', tabs: ['admin'] }
+            { name: 'Analyze', tabs: ['clipboard', 'stats', 'profiles', 'trends', 'tactics', 'season report'] },
+            { name: 'Prepare', tabs: ['goals', 'scout', 'practice', 'playbook', 'ask coach'] },
+            { name: 'Settings', tabs: ['admin'] } // shown as the gear button, not a main tab
         ];
-        const TAB_LABELS = { playbook: 'Playbook', goals: 'Goals', live: 'Live game', log: 'Game log', new: 'Edit box score', stats: 'Stats', trends: 'Trends', profiles: 'Player profiles', 'season report': 'Season report', scout: 'Scout', practice: 'Practice focus', tactics: 'Tactics', clipboard: 'Clipboard', 'ask coach': 'Ask coach', admin: 'Admin' };
+        const TAB_LABELS = { playbook: 'Playbook', goals: 'Goals', live: 'Live game', log: 'Game log', new: 'Edit box score', stats: 'Stats', trends: 'Trends', profiles: 'Players', 'season report': 'Season report', scout: 'Scout', practice: 'Practice focus', tactics: 'Lineups & shots', clipboard: 'Season overview', 'ask coach': 'Ask coach', admin: 'Settings' };
         const STAT_KEEPER_TABS = ['live'];
 
         // NEW: access control. Anyone with the link can VIEW everything (stats, history, roster) — no
@@ -365,6 +369,34 @@
                 window.localStorage.setItem(key, JSON.stringify(value));
             }, [key, value]);
             return [value, setValue];
+        }
+
+        // NEW: in-app "are you sure?" dialog. Native confirm() pop-ups are clunky on an iPad and freeze
+        // the page until dismissed. Usage: if (!(await uiConfirm(msg, { confirmLabel, danger }))) return;
+        // The first paragraph of msg (before a blank line) is the title, the rest is the detail.
+        let _confirmSetter = null;
+        const uiConfirm = (message, opts = {}) => new Promise(resolve => {
+            if (!_confirmSetter) { resolve(window.confirm(message)); return; }
+            _confirmSetter({ message: String(message), confirmLabel: opts.confirmLabel || 'Yes', cancelLabel: opts.cancelLabel || 'Cancel', danger: !!opts.danger, resolve });
+        });
+        function ConfirmHost() {
+            const [req, setReq] = React.useState(null);
+            React.useEffect(() => { _confirmSetter = setReq; return () => { _confirmSetter = null; }; }, []);
+            if (!req) return null;
+            const [title, ...rest] = req.message.split('\n\n');
+            const done = (v) => { setReq(null); req.resolve(v); };
+            return (
+                <div className="fixed inset-0 z-[200] bg-black/80 flex items-center justify-center p-4" onClick={() => done(false)}>
+                    <div className="bg-zinc-900 border border-zinc-700 rounded-2xl p-6 w-full max-w-md space-y-4" onClick={e => e.stopPropagation()}>
+                        <div className="text-xl font-black">{title}</div>
+                        {rest.length > 0 && <p className="text-sm text-zinc-300 whitespace-pre-line">{rest.join('\n\n')}</p>}
+                        <div className="flex gap-2">
+                            <button onClick={() => done(false)} className="flex-1 py-3 bg-zinc-800 rounded-lg font-bold text-sm">{req.cancelLabel}</button>
+                            <button onClick={() => done(true)} className={`flex-1 py-3 rounded-lg font-black uppercase text-sm ${req.danger ? 'bg-red-600 text-white' : 'bg-gold text-black'}`}>{req.confirmLabel}</button>
+                        </div>
+                    </div>
+                </div>
+            );
         }
 
         function App() {
@@ -595,6 +627,12 @@
             // ANALYTICS & TACTICS STATE
             const [tacticsFilter, setTacticsFilter] = React.useState('season');
             const [selectedProfile, setSelectedProfile] = React.useState(ROSTER[0] ? ROSTER[0].name : '');
+            // NEW: the roster loads after first render, so pick the first active player once it arrives
+            // (and again after switching teams) instead of leaving the profile blank with nothing selected.
+            const rosterKey = ROSTER.map(p => p.name).join('|');
+            React.useEffect(() => {
+                if (ROSTER.length && !ROSTER.some(p => p.name === selectedProfile)) setSelectedProfile((ACTIVE_ROSTER[0] || ROSTER[0]).name);
+            }, [rosterKey, selectedProfile]);
             const [sortConfig, setSortConfig] = React.useState({ key: 'ppg', direction: 'desc' });
             
             // AI
@@ -700,7 +738,7 @@
 
             const togglePossession = () => setPossession(prev => prev === 'home' ? 'away' : 'home');
 
-            const changeQuarter = (q) => {
+            const changeQuarter = async (q) => {
                 if(gameMeta.quarter === q) return;
                 if(!requireEditor()) return;
                 // NEW: overtime. Under NFHS rules, overtime is an extension of the 4th quarter, so team
@@ -710,7 +748,7 @@
                 const msg = intoOT
                     ? `Start ${periodLabel(q)}?\n\nTeam fouls carry over from the 4th quarter, and each team gets one extra full timeout.`
                     : `Start ${periodLabel(q)}? This will reset Team Fouls.`;
-                if(confirm(msg)) {
+                if((await uiConfirm(msg, { confirmLabel: `Start ${periodLabel(q)}` }))) {
                     setGameMeta(prev => ({ ...prev, quarter: q }));
                     if (intoOT) {
                         const added = q - Math.max(prevQ, 4);
@@ -726,7 +764,7 @@
             
             const deleteGame = async (id) => {
                 if(!requireEditor()) return;
-                if(!confirm("Are you sure you want to delete this game record?")) return;
+                if(!(await uiConfirm("Delete this game?\n\nThe saved box score is removed for good.", { confirmLabel: "Delete game", danger: true }))) return;
                 try {
                     await db.collection(COL('games')).doc(id).delete();
                     showToast("Game Deleted", "info");
@@ -767,10 +805,10 @@
                 saveRoster(team, current.map(p => p.id === id ? { ...p, ...fields } : p));
             };
 
-            const removeRosterPlayer = (team, id) => {
+            const removeRosterPlayer = async (team, id) => {
                 if(!requireEditor()) return;
                 const player = (rosterData[team] || []).find(p => p.id === id);
-                if(!confirm(`Remove ${player ? player.name : 'this player'} from the roster? Their past game stats stay intact.`)) return;
+                if(!(await uiConfirm(`Remove ${player ? player.name : 'this player'} from the roster? Their past game stats stay intact.`))) return;
                 saveRoster(team, (rosterData[team] || []).filter(p => p.id !== id));
                 showToast("Player removed from roster", "info");
             };
@@ -906,9 +944,9 @@
                 setPendingShotStat({ statKey, pointVal, forPid: OPPONENT_ID });
             };
 
-            const handleUndo = (event) => {
+            const handleUndo = async (event) => {
                 if(!requireEditor()) return;
-                if(!confirm(`Undo ${event.name} ${event.desc}?`)) return;
+                if(!(await uiConfirm(`Undo ${event.name} ${event.desc}?`, { confirmLabel: "Undo" }))) return;
                 
                 if (event.type === 'timeout') {
                     setTimeouts(prev => ({ ...prev, [event.toType]: prev[event.toType].map((t, i) => i === event.toIndex ? true : t) }));
@@ -955,16 +993,16 @@
             // NEW: repairs the active lineup if a slot no longer matches any current roster player —
             // e.g. someone's jersey number got changed in Manage Roster, so the id saved in the lineup
             // doesn't point to anyone anymore and that starter silently disappears from the live view.
-            const fixLineup = () => {
+            const fixLineup = async () => {
                 if (!requireEditor()) return;
-                if (!confirm("Reset the active lineup to the first 5 players on the current roster?")) return;
+                if (!(await uiConfirm("Reset the active lineup to the first 5 players on the current roster?"))) return;
                 setActiveLineup(ACTIVE_ROSTER.slice(0, 5).map(p => p.id));
                 showToast("Lineup reset to match current roster", "info");
             };
 
-            const resetLiveGame = () => {
+            const resetLiveGame = async () => {
                 if(!requireEditor()) return;
-                if(!confirm("⚠️ RESET GAME?\n\nThis will wipe all current stats for this game. It cannot be undone.")) return;
+                if(!(await uiConfirm("Reset this game?\n\nThis wipes every stat in the game in progress. It cannot be undone.", { confirmLabel: "Reset game", danger: true }))) return;
                 setPlayerStats({});
                 setOpponentStats({fg2m:0,fg2a:0,fg3m:0,fg3a:0,ftm:0,fta:0,to:0});
                 setGameMeta(prev => ({ ...prev, oppScore: 0, quarter: 1 }));
@@ -1348,7 +1386,7 @@
             };
             const removeScoutNote = async (oppKey, note) => {
                 if (!requireEditor()) return;
-                if (!confirm("Remove this note?")) return;
+                if (!(await uiConfirm("Remove this note?"))) return;
                 try {
                     await db.collection(COL('scoutingReports')).doc(oppKey).update({ notes: firebase.firestore.FieldValue.arrayRemove(note) });
                 } catch(e) { showToast("Error removing note: " + e.message, "error"); }
@@ -1453,14 +1491,14 @@
             const handleSort = (key) => { setSortConfig({ key, direction: sortConfig.key === key && sortConfig.direction === 'desc' ? 'asc' : 'desc' }); };
             const exportData = () => { if(!games.length) return showToast("No data.", "error"); const headers = ['date', 'opp', 'team', 'season', 'teamScore', 'oppScore', 'result', 'venue', 'stats', 'playStats']; const csvContent = "data:text/csv;charset=utf-8," + [headers.join(','), ...games.map(g => headers.map(h => { let val = g[h]; if (typeof val === 'object') { val = JSON.stringify(val).replace(/"/g, '""'); return `"${val}"`; } return `"${val}"`; }).join(','))].join('\n'); const link = document.createElement("a"); link.setAttribute("href", encodeURI(csvContent)); link.setAttribute("download", `eagles_backup_${localToday()}.csv`); document.body.appendChild(link); link.click(); };
             const importData = (e) => { if(!requireEditor()){ e.target.value=''; return; } const file = e.target.files[0]; if (!file) return; const reader = new FileReader(); reader.onload = async (event) => { try { const rows = event.target.result.split('\n'); const headers = rows[0].split(','); let importedCount = 0; const parseCSVRow = (row) => { const regex = /(?:,|\n|^)("(?:(?:"")*[^"]*)*"|[^",\n]*|(?:\n|$))/g; const matches = []; let match; while(match = regex.exec(row)) { let val = match[1]; if(val.startsWith('"') && val.endsWith('"')) val = val.substring(1, val.length-1).replace(/""/g, '"'); matches.push(val); } return matches; }; for (let i = 1; i < rows.length; i++) { if (!rows[i].trim()) continue; const vals = parseCSVRow(rows[i]); const payload = {}; headers.forEach((h, index) => { const key = h.trim(); let val = vals[index]; if (['stats','opponentStats','playStats'].includes(key)) try { val = JSON.parse(val); } catch(e) { val = []; } if(['teamScore','oppScore'].includes(key)) val = parseInt(val) || 0; payload[key] = val; }); payload.updatedAt = firebase.firestore.FieldValue.serverTimestamp(); await db.collection(COL('games')).add(payload); importedCount++; } showToast(`Restored ${importedCount} games!`, "success"); } catch (err) { showToast("Error importing CSV", "error"); } }; reader.readAsText(file); };
-            const purgeData = async () => { if(!requireEditor()) return; if(!confirm("⚠️ DELETE ALL GAMES?\n\nThis deletes every game for every team and season. This cannot be undone. Consider exporting a backup first.")) return; const snap = await db.collection(COL('games')).get(); const batch = db.batch(); snap.docs.forEach(doc => batch.delete(doc.ref)); await batch.commit(); showToast("Purged.", "success"); };
+            const purgeData = async () => { if(!requireEditor()) return; if(!(await uiConfirm("⚠️ DELETE ALL GAMES?\n\nThis deletes every game for every team and season. This cannot be undone. Consider exporting a backup first."))) return; const snap = await db.collection(COL('games')).get(); const batch = db.batch(); snap.docs.forEach(doc => batch.delete(doc.ref)); await batch.commit(); showToast("Purged.", "success"); };
 
             // NEW: archives old (untagged) games as LEGACY_SEASON and switches the active view to a fresh season.
             // This never deletes anything — it just tags and switches, so history stays fully accessible via the season dropdown.
             const migrateLegacySeason = async () => {
                 if(!db) return showToast("Offline Mode", "error");
                 if(!requireEditor()) return;
-                if(!confirm(`Tag all untagged games as "${LEGACY_SEASON}" and switch your active view to "${CURRENT_SEASON_DEFAULT}"?\n\nNothing will be deleted.`)) return;
+                if(!(await uiConfirm(`Tag all untagged games as "${LEGACY_SEASON}" and switch your active view to "${CURRENT_SEASON_DEFAULT}"?\n\nNothing will be deleted.`))) return;
                 try {
                     const snap = await db.collection(COL('games')).get();
                     const batch = db.batch();
@@ -1484,7 +1522,7 @@
             const keeperOnly = isStatKeeperAccount || statKeeperMode;
             React.useEffect(() => { if (keeperOnly && !STAT_KEEPER_TABS.includes(view)) setView('live'); }, [keeperOnly, view]);
             const enterStatKeeperMode = () => { setStatKeeperMode(true); setView('live'); showToast("Stat keeper mode on. Only the Live game is shown.", "info"); };
-            const exitStatKeeperMode = () => { if (confirm("Exit stat keeper mode?\n\nThis shows every coach tab again.")) setStatKeeperMode(false); };
+            const exitStatKeeperMode = async () => { if ((await uiConfirm("Exit stat keeper mode?\n\nThis shows every coach tab again.", { confirmLabel: "Exit" }))) setStatKeeperMode(false); };
             const activeGroup = NAV_GROUPS.find(g => g.tabs.includes(view)) || NAV_GROUPS[0];
 
             // NEW: guard against mixing JV and Varsity. Switching teams with stats in progress asks first.
@@ -1507,7 +1545,8 @@
 
             // NEW: weekly full backup (games + rosters + scouting) with a reminder banner for coaches.
             const [lastBackup, setLastBackup] = useStickyState(0, 'eagles_last_backup');
-            const backupDue = isAdmin && games.length > 0 && (Date.now() - (lastBackup || 0)) > 7 * 24 * 60 * 60 * 1000;
+            const [backupSnooze, setBackupSnooze] = useStickyState(0, 'eagles_backup_snooze');
+            const backupDue = isAdmin && games.length > 0 && (Date.now() - (lastBackup || 0)) > 7 * 24 * 60 * 60 * 1000 && Date.now() > (backupSnooze || 0);
             const downloadBackup = async () => {
                 if (!isAdmin) return;
                 let plays = [];
@@ -1520,10 +1559,10 @@
                 setLastBackup(Date.now());
                 showToast("Backup downloaded. Keep it somewhere safe (Files, Drive, email to yourself).", "success");
             };
-            const restoreBackup = (e) => {
+            const restoreBackup = async (e) => {
                 const file = e.target.files && e.target.files[0]; e.target.value = '';
                 if (!file || !isAdmin || !db) return;
-                if (!confirm("Restore from this backup?\n\nGames, rosters, scouting notes, goals, and gut checks in the file are written back. Nothing else is deleted.")) return;
+                if (!(await uiConfirm("Restore from this backup?\n\nGames, rosters, scouting notes, goals, and gut checks in the file are written back. Nothing else is deleted."))) return;
                 const reader = new FileReader();
                 reader.onload = async (ev) => {
                     try {
@@ -1593,7 +1632,7 @@
             // NEW: wipes every test_ collection so a test run can start fresh. Only works in test mode.
             const clearTestData = async () => {
                 if (!TEST_MODE || !isAdmin || !db) return;
-                if (!confirm("Clear ALL test data?\n\nThis only deletes test_ collections. Real data is not touched.")) return;
+                if (!(await uiConfirm("Clear ALL test data?\n\nThis only deletes test_ collections. Real data is not touched."))) return;
                 try {
                     for (const name of TEST_COLLECTIONS) {
                         const snap = await db.collection(`test_${name}`).get();
@@ -1679,7 +1718,7 @@
                                 <button onClick={()=>setShowSignIn(true)} className="bg-blue-700 hover:bg-blue-600 text-white text-[10px] font-black uppercase px-3 py-1.5 rounded-full">🔒 Sign In To Edit</button>
                             ))}
                             {!isOnline && <span className="bg-orange-900/40 border border-orange-600 text-orange-300 text-[10px] font-black uppercase px-2 py-1 rounded-full">Offline. Stats save on this iPad</span>}
-                            {currentUser && <button onClick={signOutUser} className="text-[10px] font-bold text-zinc-500 hover:text-white uppercase underline">Sign Out</button>}
+                            {currentUser && !statKeeperMode && <button onClick={signOutUser} className="text-[10px] font-bold text-zinc-500 hover:text-white uppercase underline">Sign Out</button>}
                         </div>
                         <nav className="flex flex-col gap-1 w-full md:w-auto">
                             {keeperOnly ? (
@@ -1690,8 +1729,9 @@
                             ) : (
                                 <>
                                     <div className="flex gap-1 overflow-x-auto pb-1 no-scrollbar items-center">
-                                        {NAV_GROUPS.map(g => (<button key={g.name} onClick={()=>setView(g.tabs[0])} className={`nav-btn ${activeGroup.name===g.name?'active-nav':'inactive-nav'}`}>{g.name}</button>))}
+                                        {NAV_GROUPS.filter(g => g.name !== 'Settings').map(g => (<button key={g.name} onClick={()=>setView(g.tabs[0])} className={`nav-btn ${activeGroup.name===g.name?'active-nav':'inactive-nav'}`}>{g.name}</button>))}
                                         {isAdmin && <button onClick={enterStatKeeperMode} className="nav-btn inactive-nav">Stat keeper mode</button>}
+                                        {isAdmin && <button onClick={()=>setView('admin')} title="Roster, backups, and season setup" className={`nav-btn ${view==='admin'?'active-nav':'inactive-nav'}`}>⚙️ Settings</button>}
                                     </div>
                                     {activeGroup.tabs.length > 1 && (
                                         <div className="flex gap-1 overflow-x-auto pb-1 no-scrollbar">
@@ -1725,10 +1765,13 @@
                     {/* NEW: one shared list of scheduled opponents for every opponent box */}
                     <datalist id="opp-suggestions">{SCHEDULE_OPPONENTS.map(o => <option key={o} value={o} />)}</datalist>
 
-                    {backupDue && !keeperOnly && (
+                    {backupDue && !keeperOnly && view !== 'live' && (
                         <div className="mb-4 flex flex-col md:flex-row items-center justify-between gap-3 bg-blue-950/40 border border-blue-800 rounded-xl px-4 py-3 no-print">
                             <div className="text-sm text-blue-200">Weekly backup due. Download a copy of every game, roster, and scouting note.</div>
-                            <button onClick={downloadBackup} className="py-2 px-4 bg-blue-700 hover:bg-blue-600 rounded font-black uppercase text-xs whitespace-nowrap">Download backup</button>
+                            <div className="flex gap-2 items-center">
+                                <button onClick={()=>setBackupSnooze(Date.now() + 24 * 60 * 60 * 1000)} className="py-2 px-3 text-blue-300 text-xs underline whitespace-nowrap">Remind me tomorrow</button>
+                                <button onClick={downloadBackup} className="py-2 px-4 bg-blue-700 hover:bg-blue-600 rounded font-black uppercase text-xs whitespace-nowrap">Download backup</button>
+                            </div>
                         </div>
                     )}
 
@@ -1768,7 +1811,12 @@
                                     </div>
                                 </div>
                                 <div className="flex flex-col items-center gap-1"><div onClick={togglePossession} className="poss-arrow text-white">{possession==='home'?'⬅️':'➡️'}</div><div className="text-zinc-500 font-black text-xs text-center leading-tight">Possession<br/>arrow</div></div>
-                                <div className="score-box"><div className="flex justify-center mb-1"><div className="score-val text-white" title="Opponent points come from logged baskets and free throws, so every point can be undone">{gameMeta.oppScore}</div></div><input list="opp-suggestions" value={gameMeta.opp} onChange={e=>setGameMeta({...gameMeta, opp:e.target.value})} className="bg-transparent border-0 text-center score-label w-full outline-none placeholder-zinc-700" placeholder="OPPONENT"/></div>
+                                <div className="score-box"><div className="flex justify-center mb-1"><div className="score-val text-white" title="Opponent points come from logged baskets and free throws, so every point can be undone">{gameMeta.oppScore}</div></div><input list="opp-suggestions" value={gameMeta.opp} onChange={e=>setGameMeta({...gameMeta, opp:e.target.value})} aria-label="Opponent" className={`text-center score-label w-full outline-none rounded-md py-1 ${(gameMeta.opp||'').trim() ? 'bg-transparent border border-transparent' : 'bg-black border border-dashed border-gold text-gold placeholder-yellow-600'}`} placeholder="Tap to add opponent"/>
+                                    <div className="flex justify-center items-center gap-2 mt-1">
+                                        <button onClick={()=>setGameMeta(prev=>({ ...prev, venue: prev.venue === 'Home' ? 'Away' : 'Home' }))} title="Tap to switch Home or Away" className="px-3 py-1 rounded-full bg-zinc-800 border border-zinc-700 text-zinc-200 text-[11px] font-black uppercase">{gameMeta.venue || 'Home'}</button>
+                                        {(gameMeta.opp||'').trim() && isScrimGame({ date: gameMeta.date, opp: gameMeta.opp }) && <span className="px-2 py-1 rounded-full bg-zinc-800 text-zinc-400 text-[11px] font-black uppercase">Scrimmage</span>}
+                                    </div>
+                                </div>
                             </div>
                             
                             {/* NEW: "?" help screen. Tap anywhere to close. */}
@@ -1828,7 +1876,7 @@
                                 <div className="q-selector" style={{gridColumn:'span 2'}}>{Array.from({length: Math.min(8, Math.max(5, gameMeta.quarter + 1))}, (_, i) => i + 1).map(q=><button key={q} onClick={()=>changeQuarter(q)} className={`q-btn ${gameMeta.quarter===q?'active':''}`}>{periodLabel(q)}</button>)}</div>
                                 <div className="hud-box"><div className="hud-label">Our fouls</div><div className={`hud-val ${quarterFouls>=5?'text-red-500':'text-white'}`}>{quarterFouls}</div>{quarterFouls>=5 && <div className="bonus-badge">They shoot</div>}</div>
                                 <div className="hud-box"><div className="hud-label">Their fouls</div><div className={`hud-val ${oppQuarterFouls>=5?'text-green-500':'text-white'}`}>{oppQuarterFouls}</div>{oppQuarterFouls>=5 && <div className="bonus-badge" style={{background:'#16a34a'}}>We shoot</div>}</div>
-                                <div className="hud-box"><div className="hud-label">Our FG%</div><div className={`hud-val ${insights.fgPct>=45?'text-green-500':(insights.fgPct<30?'text-red-500':'text-white')}`}>{insights.fgPct}%</div></div>
+                                <div className="hud-box"><div className="hud-label">Our FG%</div><div className={`hud-val ${insights.teamFGA===0?'text-zinc-500':(insights.fgPct>=45?'text-green-500':(insights.fgPct<30?'text-red-500':'text-white'))}`}>{insights.teamFGA===0?'—':`${insights.fgPct}%`}</div></div>
                                 <div className="hud-box"><div className="hud-label">Turnovers</div><div className={`hud-val ${insights.teamTO>=12?'text-red-500':'text-white'}`}>{insights.teamTO}</div></div>
                                 <button onClick={()=>setShowSnapshot(true)} className="bg-blue-600 text-white text-[10px] font-black uppercase p-2 rounded h-full">📊 Quick summary</button>
                                 <button onClick={()=>setShowHelp(true)} aria-label="How to keep stats" className="bg-zinc-800 border border-zinc-600 text-white font-black rounded h-full" style={{minWidth:'48px', fontSize:'22px'}}>?</button>
@@ -1874,8 +1922,9 @@
                                             </div>
                                         ))}
                                     </div>
-                                    <button onClick={saveGame} className="w-full py-3 bg-blue-700 hover:bg-blue-600 rounded font-black uppercase text-xs">SAVE GAME</button>
-                                    <button onClick={resetLiveGame} className="w-full py-2 bg-zinc-900 text-red-500 font-bold text-xs rounded hover:bg-red-900/20">RESET / CLEAR GAME</button>
+                                    <button onClick={saveGame} className="w-full py-3 bg-blue-700 hover:bg-blue-600 rounded font-black uppercase text-xs">Save game (final)</button>
+                                    <div className="text-[11px] text-zinc-500 text-center leading-tight">Stats save as you go. Tap Save game when it ends.</div>
+                                    <button onClick={resetLiveGame} className="w-full mt-3 py-1 text-zinc-500 hover:text-red-400 text-[11px] underline">Clear this game and start over</button>
                                 </div>
 
                                 {/* Column 2: the court (shots for both teams) */}
@@ -2035,6 +2084,7 @@
                                 <h2 className="text-2xl font-black italic uppercase text-white tracking-tighter">Season <span className="text-gold">Overview</span></h2>
                                 <div className="text-xs font-bold text-zinc-500 uppercase tracking-widest">{visibleGames.length} Games Played</div>
                             </div>
+                            {visibleGames.length === 0 && <div className="bento-card text-sm text-zinc-400 text-center">The record, team averages, leaders, and single-game highs fill in once {teamName(activeTeam)} has a saved game this season.</div>}
 
                             {/* Team Stats Strip */}
                             <div className="bento-card">
@@ -2105,7 +2155,7 @@
                                 </div>
                                 <div className="bento-card">
                                     <h3 className="text-xl font-black text-gold uppercase italic mb-2">🎯 Shot Chart</h3>
-                                    <p className="text-xs text-zinc-500 mb-4">Every shot logged with "LOG SHOT" on the Live tab, plotted here — green makes, red misses. Opponent shots aren't attributed to a player, just location, so you can see where they're getting shots up.</p>
+                                    <p className="text-xs text-zinc-500 mb-4">Every shot tapped on the court in Live game, plotted here — green makes, red misses. Opponent shots aren't attributed to a player, just location, so you can see where they're getting shots up.</p>
                                     <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                                         <div>
                                             <div className="text-xs font-black text-gold uppercase mb-2 text-center">Us ({usShots.length})</div>
@@ -2142,6 +2192,16 @@
 
                     {view === 'scout' && (
                         <div className="space-y-4 animate-slideIn max-w-3xl mx-auto">
+                            {!selectedScoutOpp && (() => {
+                                const nextUp = SCHEDULE_2026_27.find(x => x.date >= localToday() && x.teams.includes(activeTeam));
+                                return (
+                                    <div className="bento-card space-y-2 border-l-4 border-gold">
+                                        <div className="text-lg font-black uppercase">Scouting reports</div>
+                                        <p className="text-sm text-zinc-300">Pick an opponent to build a one-page report: Personnel, Offense, Defense, Inbounds, and Keys to the game. Every coach's notes for the same team combine, and they stay here for the rematch.</p>
+                                        {nextUp && <button onClick={()=>setSelectedScoutOpp(nextUp.opp)} className="py-2 px-4 bg-gold text-black rounded font-black uppercase text-xs">Next up: {nextUp.opp} ({nextUp.date.slice(5).replace('-', '/')}, {nextUp.venue})</button>}
+                                    </div>
+                                );
+                            })()}
                             <div className="bento-card space-y-3">
                                 <div className="text-xs font-bold text-zinc-500 uppercase">Opponent</div>
                                 <div className="flex flex-col md:flex-row gap-2">
@@ -2300,6 +2360,7 @@
 
                     {view === 'stats' && (
                         <div className="bento-card overflow-hidden animate-slideIn">
+                             {visibleGames.length === 0 && <div className="text-sm text-zinc-400 text-center pb-3">No games saved yet for {teamName(activeTeam)} in {activeSeason}. Averages fill in after the first saved game.</div>}
                              <div className="overflow-x-auto"><table className="w-full text-left border-collapse stat-table"><thead><tr><th onClick={()=>handleSort('name')}>Player</th><th onClick={()=>handleSort('ppg')} className="text-gold">PPG</th><th onClick={()=>handleSort('rpg')}>RPG</th><th onClick={()=>handleSort('apg')}>APG</th><th onClick={()=>handleSort('spg')}>SPG</th><th onClick={()=>handleSort('bpg')}>BPG</th><th onClick={()=>handleSort('topg')} className="text-red-400">TO</th><th onClick={()=>handleSort('fgPct')}>FG%</th><th onClick={()=>handleSort('eFG')} className="text-blue-400">eFG%</th><th onClick={()=>handleSort('TS')} className="text-purple-400">TS%</th></tr></thead><tbody className="text-xs font-bold divide-y divide-white/5">{seasonStats.map(p=>(<tr key={p.name} className="stat-row"><td className="p-3 sticky left-0 bg-zinc-900/50">{p.name}</td><td className="p-3 text-gold stat-val">{p.ppg}</td><td className="p-3 stat-val">{p.rpg}</td><td className="p-3 stat-val">{p.apg}</td><td className="p-3 stat-val">{p.spg}</td><td className="p-3 stat-val">{p.bpg}</td><td className="p-3 stat-val text-zinc-400">{p.topg}</td><td className="p-3 stat-val">{p.fgPct}%</td><td className="p-3 stat-val text-blue-400">{p.eFG}%</td><td className="p-3 stat-val text-purple-400">{p.TS}%</td></tr>))}</tbody></table></div>
                         </div>
                     )}
@@ -2312,7 +2373,7 @@
                                         <div className="trend-title text-white">{t.title}</div>
                                         <div className="trend-desc">{t.desc}</div>
                                     </div>
-                                )) : <div className="col-span-3 text-center text-zinc-500 p-4">Need at least 2 games to analyze trends.</div>}
+                                )) : <div className="col-span-3 text-center text-zinc-500 p-4">Trends show up after 2 saved games. The charts below fill in after the first one.</div>}
                             </div>
                             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
                                 <div className="bento-card h-64"><h3 className="text-xs font-black uppercase mb-2">Scoring</h3><TrendChart games={visibleGames} type="score"/></div>
@@ -2441,19 +2502,25 @@ service cloud.firestore {
 
                             <div className="bento-card border-t-4 border-gold space-y-4">
                                 <h3 className="font-black text-gold uppercase">Backup & Restore</h3>
-                                <p className="text-xs text-zinc-400">Export downloads every game, across all teams and seasons, as a CSV backup. Import restores games from a previously exported CSV.</p>
+                                <p className="text-xs text-zinc-400">One file holds everything: every game for both teams and all seasons, rosters, scouting notes, goals, gut checks, and plays. Download one each week and keep it in Files, Drive, or your email. Restore writes a backup file back in without deleting anything else.</p>
                                 <div className="flex flex-col md:flex-row gap-3">
-                                    <button onClick={exportData} className="flex-1 py-3 bg-blue-700 hover:bg-blue-600 rounded font-black uppercase text-xs">⬇️ Export All Data</button>
-                                    <button onClick={downloadBackup} className="flex-1 py-3 bg-gold text-black rounded font-black uppercase text-xs">⬇️ Full backup (weekly)</button>
+                                    <button onClick={downloadBackup} className="flex-1 py-3 bg-gold text-black rounded font-black uppercase text-xs">⬇️ Download backup</button>
                                     <label className="flex-1 py-3 bg-zinc-800 hover:bg-zinc-700 rounded font-black uppercase text-xs text-center cursor-pointer">
-                                        ⬆️ Restore full backup
+                                        ⬆️ Restore from backup
                                         <input type="file" accept=".json,application/json" onChange={restoreBackup} className="hidden" />
                                     </label>
-                                    <label className="flex-1 py-3 bg-zinc-800 hover:bg-zinc-700 rounded font-black uppercase text-xs text-center cursor-pointer">
-                                        ⬆️ Import CSV
-                                        <input type="file" accept=".csv" onChange={importData} className="hidden" />
-                                    </label>
                                 </div>
+                                <details className="text-xs text-zinc-500">
+                                    <summary className="cursor-pointer font-bold text-zinc-400 uppercase">Spreadsheet (CSV) options</summary>
+                                    <p className="mt-2">For opening games in Excel or Google Sheets. CSV covers games only, not rosters or scouting, so use Download backup above for safekeeping.</p>
+                                    <div className="flex flex-col md:flex-row gap-3 mt-2">
+                                        <button onClick={exportData} className="flex-1 py-2 bg-zinc-800 hover:bg-zinc-700 rounded font-black uppercase text-xs">⬇️ Export games as CSV</button>
+                                        <label className="flex-1 py-2 bg-zinc-800 hover:bg-zinc-700 rounded font-black uppercase text-xs text-center cursor-pointer">
+                                            ⬆️ Import games from CSV
+                                            <input type="file" accept=".csv" onChange={importData} className="hidden" />
+                                        </label>
+                                    </div>
+                                </details>
                             </div>
 
                             <div className="bento-card border-t-4 border-yellow-500 space-y-4">
@@ -3116,11 +3183,15 @@ service cloud.firestore {
             };
             const vp = vpOf(draft);
             const isSetup = ctx == null && k === 0;
-            const allTags = Array.from(new Set(plays.flatMap(p => p.tags || []))).sort();
+            // CHANGED: "Man-to-man" and "Man-to-Man" were showing as two separate tags. Tags now match regardless of capitalization.
+            const tagKey = (t) => (t || '').trim().replace(/\s+/g, ' ').toLowerCase();
+            const uniqTags = (list) => { const m = new Map(); list.forEach(t => { const k = tagKey(t); if (k && !m.has(k)) m.set(k, t.trim()); }); return [...m.values()]; };
+            const hasTag = (list, t) => (list || []).some(x => tagKey(x) === tagKey(t));
+            const allTags = uniqTags(plays.flatMap(p => p.tags || [])).sort((a, b) => a.localeCompare(b));
             const shownPlays = plays.filter(p => {
                 const hay = [p.name, p.category, p.summary, ...(p.tags || [])].join(' ').toLowerCase();
                 return (!fText || hay.includes(fText.toLowerCase())) && (fCat === 'All' || p.category === fCat)
-                    && fTags.every(t => (p.tags || []).includes(t))
+                    && fTags.every(t => hasTag(p.tags, t))
                     && (fStatus === 'All' || (fStatus === 'Published' ? p.published : !p.published));
             });
 
@@ -3131,8 +3202,8 @@ service cloud.firestore {
             React.useEffect(() => () => rafRef.current && cancelAnimationFrame(rafRef.current), []);
 
             const change = (fn) => { setDraft(d => { const n = JSON.parse(JSON.stringify(d)); fn(n); return n; }); setDirty(true); };
-            const open = (p) => { if (dirty && !confirm("Leave without saving your changes?")) return; const { id, updatedAt, author: au, ...rest } = p; setDraft(JSON.parse(JSON.stringify({ ...pbNewPlay(), ...rest }))); setEditId(id || null); setK(0); setActor(null); setCtx(null); setDirty(false); };
-            const close = () => { if (dirty && !confirm("Leave without saving your changes?")) return; setDraft(null); setEditId(null); setDirty(false); };
+            const open = async (p) => { if (dirty && !(await uiConfirm("Leave without saving your changes?"))) return; const { id, updatedAt, author: au, ...rest } = p; setDraft(JSON.parse(JSON.stringify({ ...pbNewPlay(), ...rest }))); setEditId(id || null); setK(0); setActor(null); setCtx(null); setDirty(false); };
+            const close = async () => { if (dirty && !(await uiConfirm("Leave without saving your changes?"))) return; setDraft(null); setEditId(null); setDirty(false); };
             const save = () => {
                 if (!draft.name.trim()) return showToast("Give the play a name first", "error");
                 const ref = editId ? db.collection(COL('plays')).doc(editId) : db.collection(COL('plays')).doc();
@@ -3174,9 +3245,9 @@ service cloud.firestore {
                 document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(url), 2000);
                 showToast(`Exported ${out.length} play${out.length === 1 ? '' : 's'}`, "success");
             };
-            const remove = () => {
+            const remove = async () => {
                 if (!editId) { setDraft(null); return; }
-                if (!confirm(`Delete "${draft.name || 'this play'}"? Players will no longer see it.`)) return;
+                if (!(await uiConfirm(`Delete "${draft.name || 'this play'}"? Players will no longer see it.`))) return;
                 db.collection(COL('plays')).doc(editId).delete().catch(e => showToast("Couldn't delete: " + e.message, "error"));
                 setDraft(null); setEditId(null); setDirty(false); showToast("Play deleted", "info");
             };
@@ -3217,8 +3288,9 @@ service cloud.firestore {
             });
 
             const addTag = (raw) => {
-                const t = (raw || '').trim().replace(/\s+/g, ' ');
-                if (!t) return;
+                const typed = (raw || '').trim().replace(/\s+/g, ' ');
+                if (!typed) return;
+                const t = allTags.find(x => tagKey(x) === tagKey(typed)) || typed; // reuse the existing spelling
                 change(d => { d.tags = d.tags || []; if (!d.tags.some(x => x.toLowerCase() === t.toLowerCase())) d.tags.push(t); });
                 setTagInput('');
             };
@@ -3246,8 +3318,8 @@ service cloud.firestore {
                 change(d => { d.options = d.options || []; d.options.push({ name: `Read ${n + 1}`, from: k, steps: [{ say: '', moves: [], notes: {} }] }); });
                 setCtx(n); setK(0); setActor(null);
             };
-            const deleteOption = () => {
-                if (!confirm(`Delete "${draft.options[ctx].name}"?`)) return;
+            const deleteOption = async () => {
+                if (!(await uiConfirm(`Delete "${draft.options[ctx].name}"?`))) return;
                 const from = draft.options[ctx].from;
                 change(d => { d.options.splice(ctx, 1); });
                 setCtx(null); setK(from); setActor(null);
@@ -3350,7 +3422,7 @@ service cloud.firestore {
                                     </div>
                                     <input className="w-full bg-black border border-zinc-700 p-2 rounded text-white text-sm" placeholder="Add a tag and press Enter (for example, Man-to-man)" value={tagInput} onChange={e => { const v = e.target.value; if (v.includes(',')) { v.split(',').forEach(addTag); } else setTagInput(v); }} onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); addTag(tagInput); } }} />
                                     <div className="flex flex-wrap gap-1">
-                                        {Array.from(new Set([...allTags, ...PB_TAG_SUGGESTIONS])).filter(t => !(draft.tags || []).includes(t)).slice(0, 14).map(t => <button key={t} onClick={() => addTag(t)} className="text-[11px] border border-zinc-700 text-zinc-400 rounded-full px-2 py-0.5 hover:border-gold">+ {t}</button>)}
+                                        {uniqTags([...allTags, ...PB_TAG_SUGGESTIONS]).filter(t => !hasTag(draft.tags, t)).slice(0, 14).map(t => <button key={t} onClick={() => addTag(t)} className="text-[11px] border border-zinc-700 text-zinc-400 rounded-full px-2 py-0.5 hover:border-gold">+ {t}</button>)}
                                     </div>
                                 </div>
                                 <textarea rows="2" className="w-full bg-black border border-zinc-700 p-2 rounded text-white text-sm" placeholder="One-line summary (when we run it)" value={draft.summary} onChange={e => change(d => { d.summary = e.target.value; })} />
@@ -3561,15 +3633,15 @@ service cloud.firestore {
                 const chart = new Chart(ref.current.getContext('2d'), { type: type==='to'?'bar':'line', data:{labels,datasets}, options:{responsive:true, maintainAspectRatio:false, plugins:{legend:{labels:{color:'white'}}}, scales:{y:{grid:{color:'#333'},ticks:{color:'#888'}}, x:{grid:{display:false}}}}});
                 return () => chart.destroy();
             }, [games, type]);
-            return games.length ? <canvas ref={ref} /> : <div className="h-full flex items-center justify-center text-zinc-500 text-xs">No Data</div>;
+            return games.length ? <canvas ref={ref} /> : <div className="h-full flex items-center justify-center text-zinc-500 text-xs text-center px-4">Fills in after the first saved game</div>;
         }
 
         function StatBox({label, val, color}) { return (<div className="bento-card text-center py-4"><div className="text-[10px] font-black uppercase text-zinc-500 tracking-widest mb-1">{label}</div><div className={`text-3xl font-black italic tracking-tighter ${color||'text-white'}`}>{val}</div></div>); }
         function HighBox({label, val}) { return (<div className="bg-black/40 border border-white/5 p-3 rounded-lg text-center"><div className="text-[9px] font-bold text-zinc-500 uppercase">{label}</div><div className="text-2xl font-black text-white">{val}</div></div>); }
-        function SplitBar({label, make, att, pct}) { return (<div><div className="flex justify-between text-xs font-bold mb-1"><span className="text-zinc-400 uppercase">{label}</span><span>{make}/{att} <span className={`ml-1 ${pct>=50?'text-green-500':(pct<30?'text-red-500':'text-gold')}`}>({pct}%)</span></span></div><div className="h-2 bg-black rounded-full overflow-hidden border border-zinc-800"><div style={{width: `${pct}%`}} className={`h-full ${pct>=40?'bg-green-500':'bg-zinc-600'}`}></div></div></div>); }
+        function SplitBar({label, make, att, pct}) { return (<div><div className="flex justify-between text-xs font-bold mb-1"><span className="text-zinc-400 uppercase">{label}</span><span>{make}/{att} <span className={`ml-1 ${att===0?'text-zinc-500':(pct>=50?'text-green-500':(pct<30?'text-red-500':'text-gold'))}`}>({att===0?'—':`${pct}%`})</span></span></div><div className="h-2 bg-black rounded-full overflow-hidden border border-zinc-800"><div style={{width: `${pct}%`}} className={`h-full ${pct>=40?'bg-green-500':'bg-zinc-600'}`}></div></div></div>); }
 
         const root = ReactDOM.createRoot(document.getElementById('root'));
-        root.render(<App />);
+        root.render(<><App /><ConfirmHost /></>);
     </script>
 </body>
 </html>
