@@ -1,0 +1,14 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Eagles Varsity Stats</title>
+    <!-- Short link for the Varsity team. Opens the stats app locked to Varsity. -->
+    <meta http-equiv="refresh" content="0; url=../?team=varsity">
+    <script>location.replace('../?team=varsity' + (location.search ? '&' + location.search.slice(1) : '') + location.hash);</script>
+</head>
+<body style="background:#050505;color:#fff;font-family:sans-serif;text-align:center;padding-top:40vh">
+    <a href="../?team=varsity" style="color:#FFB81C">Open Eagles Varsity Stats</a>
+</body>
+</html>
