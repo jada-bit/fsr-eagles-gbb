@@ -489,20 +489,33 @@
             if (!_confirmSetter) { resolve(window.confirm(message)); return; }
             _confirmSetter({ message: String(message), confirmLabel: opts.confirmLabel || 'Yes', cancelLabel: opts.cancelLabel || 'Cancel', danger: !!opts.danger, resolve });
         });
+        // NEW: same dialog with a text box. Resolves with what was typed, or null if cancelled.
+        // opts.mustEqual: the confirm button stays off until exactly that text is typed (used for "DELETE").
+        // opts.inputMode / opts.type: e.g. 'numeric' / 'password' for a PIN.
+        const uiPrompt = (message, opts = {}) => new Promise(resolve => {
+            if (!_confirmSetter) { resolve(window.prompt(message)); return; }
+            _confirmSetter({ message: String(message), confirmLabel: opts.confirmLabel || 'OK', cancelLabel: opts.cancelLabel || 'Cancel', danger: !!opts.danger,
+                input: { placeholder: opts.placeholder || '', inputMode: opts.inputMode || 'text', type: opts.type || 'text', mustEqual: opts.mustEqual || null }, resolve });
+        });
         function ConfirmHost() {
-            const [req, setReq] = React.useState(null);
+            const [req, setReqRaw] = React.useState(null);
+            const [text, setText] = React.useState('');
+            const setReq = (r) => { setText(''); setReqRaw(r); };
             React.useEffect(() => { _confirmSetter = setReq; return () => { _confirmSetter = null; }; }, []);
             if (!req) return null;
             const [title, ...rest] = req.message.split('\n\n');
-            const done = (v) => { setReq(null); req.resolve(v); };
+            const inp = req.input;
+            const done = (v) => { setReq(null); req.resolve(inp ? (v ? text : null) : v); };
+            const blocked = !!(inp && inp.mustEqual && text.trim() !== inp.mustEqual);
             return (
                 <div className="fixed inset-0 z-[200] bg-black/80 flex items-center justify-center p-4" onClick={() => done(false)}>
                     <div className="bg-zinc-900 border border-zinc-700 rounded-2xl p-6 w-full max-w-md space-y-4" onClick={e => e.stopPropagation()}>
                         <div className="text-xl font-black">{title}</div>
                         {rest.length > 0 && <p className="text-sm text-zinc-300 whitespace-pre-line">{rest.join('\n\n')}</p>}
+                        {inp && <input autoFocus value={text} onChange={e => setText(e.target.value)} onKeyDown={e => { if (e.key === 'Enter' && !blocked) done(true); }} type={inp.type} inputMode={inp.inputMode} placeholder={inp.placeholder} autoComplete="off" className="w-full bg-black border border-zinc-700 rounded-lg px-4 py-3 text-lg font-bold text-white outline-none focus:border-gold" />}
                         <div className="flex gap-2">
                             <button onClick={() => done(false)} className="flex-1 py-3 bg-zinc-800 rounded-lg font-bold text-sm">{req.cancelLabel}</button>
-                            <button onClick={() => done(true)} className={`flex-1 py-3 rounded-lg font-black uppercase text-sm ${req.danger ? 'bg-red-600 text-white' : 'bg-gold text-black'}`}>{req.confirmLabel}</button>
+                            <button disabled={blocked} onClick={() => done(true)} className={`flex-1 py-3 rounded-lg font-black uppercase text-sm disabled:opacity-40 ${req.danger ? 'bg-red-600 text-white' : 'bg-gold text-black'}`}>{req.confirmLabel}</button>
                         </div>
                     </div>
                 </div>
@@ -1613,7 +1626,7 @@
             const handleSort = (key) => { setSortConfig({ key, direction: sortConfig.key === key && sortConfig.direction === 'desc' ? 'asc' : 'desc' }); };
             const exportData = () => { if(!games.length) return showToast("No data.", "error"); const headers = ['date', 'opp', 'team', 'season', 'teamScore', 'oppScore', 'result', 'venue', 'stats', 'playStats']; const csvContent = "data:text/csv;charset=utf-8," + [headers.join(','), ...games.map(g => headers.map(h => { let val = g[h]; if (typeof val === 'object') { val = JSON.stringify(val).replace(/"/g, '""'); return `"${val}"`; } return `"${val}"`; }).join(','))].join('\n'); const link = document.createElement("a"); link.setAttribute("href", encodeURI(csvContent)); link.setAttribute("download", `eagles_backup_${localToday()}.csv`); document.body.appendChild(link); link.click(); };
             const importData = (e) => { if(!requireEditor()){ e.target.value=''; return; } const file = e.target.files[0]; if (!file) return; const reader = new FileReader(); reader.onload = async (event) => { try { const rows = event.target.result.split('\n'); const headers = rows[0].split(','); let importedCount = 0; const parseCSVRow = (row) => { const regex = /(?:,|\n|^)("(?:(?:"")*[^"]*)*"|[^",\n]*|(?:\n|$))/g; const matches = []; let match; while(match = regex.exec(row)) { let val = match[1]; if(val.startsWith('"') && val.endsWith('"')) val = val.substring(1, val.length-1).replace(/""/g, '"'); matches.push(val); } return matches; }; for (let i = 1; i < rows.length; i++) { if (!rows[i].trim()) continue; const vals = parseCSVRow(rows[i]); const payload = {}; headers.forEach((h, index) => { const key = h.trim(); let val = vals[index]; if (['stats','opponentStats','playStats'].includes(key)) try { val = JSON.parse(val); } catch(e) { val = []; } if(['teamScore','oppScore'].includes(key)) val = parseInt(val) || 0; payload[key] = val; }); payload.updatedAt = firebase.firestore.FieldValue.serverTimestamp(); await db.collection(COL('games')).add(payload); importedCount++; } showToast(`Restored ${importedCount} games!`, "success"); } catch (err) { showToast("Error importing CSV", "error"); } }; reader.readAsText(file); };
-            const purgeData = async () => { if(!requireEditor()) return; if(!(await uiConfirm("Delete all games?\n\nThis deletes every game for every team and season. This cannot be undone. Consider exporting a backup first."))) return; const snap = await db.collection(COL('games')).get(); const batch = db.batch(); snap.docs.forEach(doc => batch.delete(doc.ref)); await batch.commit(); showToast("Purged.", "success"); };
+            const purgeData = async () => { if(!requireEditor()) return; const typed = await uiPrompt("Delete all games?\n\nThis deletes every game for every team and season. It cannot be undone. Download a backup first.\n\nType DELETE to confirm.", { placeholder: 'DELETE', mustEqual: 'DELETE', confirmLabel: 'Delete everything', danger: true }); if (typed === null) return; const snap = await db.collection(COL('games')).get(); const batch = db.batch(); snap.docs.forEach(doc => batch.delete(doc.ref)); await batch.commit(); showToast("Purged.", "success"); };
 
             // NEW: archives old (untagged) games as LEGACY_SEASON and switches the active view to a fresh season.
             // This never deletes anything — it just tags and switches, so history stays fully accessible via the season dropdown.
@@ -1643,8 +1656,33 @@
             // NEW: stat keeper accounts (and a coach's iPad in stat keeper mode) only see the Live game.
             const keeperOnly = isStatKeeperAccount || statKeeperMode;
             React.useEffect(() => { if (keeperOnly && !STAT_KEEPER_TABS.includes(view)) setView('live'); }, [keeperOnly, view]);
-            const enterStatKeeperMode = () => { setStatKeeperMode(true); setView('live'); showToast("Stat keeper mode on. Only the Live game is shown.", "info"); };
-            const exitStatKeeperMode = async () => { if ((await uiConfirm("Exit stat keeper mode?\n\nThis shows every coach tab again.", { confirmLabel: "Exit" }))) setStatKeeperMode(false); };
+            // NEW: optional exit PIN, saved on this device only. Set when turning stat keeper mode on, so a
+            // parent keeping stats can't tap Exit and get into every coach tab. Forgot it? The signed-in
+            // coach account's password also works.
+            const [statKeeperPin, setStatKeeperPin] = useStickyState('', 'eagles_statkeeper_pin');
+            const enterStatKeeperMode = async () => {
+                const pin = await uiPrompt("Set an exit PIN\n\nThe stat keeper will need this PIN to leave stat keeper mode. Use 4 or more numbers, or leave it blank for no PIN.", { inputMode: 'numeric', type: 'password', placeholder: 'PIN (optional)', confirmLabel: 'Turn on' });
+                if (pin === null) return;
+                const clean = pin.trim();
+                if (clean && clean.length < 4) return showToast("Use at least 4 numbers for the PIN", "error");
+                setStatKeeperPin(clean);
+                setStatKeeperMode(true); setView('live');
+                showToast(clean ? "Stat keeper mode on. The PIN is needed to exit." : "Stat keeper mode on. Only the Live game is shown.", "info");
+            };
+            const exitStatKeeperMode = async () => {
+                if (!statKeeperPin) { if ((await uiConfirm("Exit stat keeper mode?\n\nThis shows every coach tab again.", { confirmLabel: "Exit" }))) setStatKeeperMode(false); return; }
+                const typed = await uiPrompt("Enter the PIN to exit\n\nForgot it? The coach's account password works too.", { inputMode: 'numeric', type: 'password', placeholder: 'PIN', confirmLabel: 'Exit' });
+                if (typed === null) return;
+                const t = typed.trim();
+                if (t === statKeeperPin) { setStatKeeperMode(false); setStatKeeperPin(''); return; }
+                if (t && currentUser && currentUser.email) {
+                    try {
+                        await currentUser.reauthenticateWithCredential(firebase.auth.EmailAuthProvider.credential(currentUser.email, typed));
+                        setStatKeeperMode(false); setStatKeeperPin(''); return;
+                    } catch (e) { /* not the password either */ }
+                }
+                showToast("Wrong PIN", "error");
+            };
             const activeGroup = NAV_GROUPS.find(g => g.tabs.includes(view)) || NAV_GROUPS[0];
 
             // NEW: guard against mixing JV and Varsity. Switching teams with stats in progress asks first.
