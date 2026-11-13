@@ -317,7 +317,11 @@
             { key: 'fg3Pct', label: '3-point %', better: 'higher', fmt: 'pct', parts: g => [sumP(g, 'fg3m'), sumP(g, 'fg3a')] },
             { key: 'ftPct', label: 'Free throw %', better: 'higher', fmt: 'pct', parts: g => [sumP(g, 'ftm'), sumP(g, 'fta')] },
             { key: 'fta', label: 'Free throw attempts', better: 'higher', fmt: 'num', parts: g => [sumP(g, 'fta'), 1] },
-            { key: 'oppFgPct', label: 'Opponent field goal %', better: 'lower', fmt: 'pct', parts: g => [(oppS(g, 'fg2m') || 0) + (oppS(g, 'fg3m') || 0), (oppS(g, 'fg2a') || 0) + (oppS(g, 'fg3a') || 0)] },
+            // FIXED: opponent missed shots only get recorded on the live court (Opponent ✓/✗). Games where
+            // their shots weren't tapped on the court only have their makes (plus a miss for each of our
+            // blocks), which showed up here as 95-100%. Those games are now left out, the same way rebound
+            // margin skips games with no opponent rebounds. Games tracked on the court count normally.
+            { key: 'oppFgPct', label: 'Opponent field goal %', better: 'lower', fmt: 'pct', parts: g => { const a = (oppS(g, 'fg2a') || 0) + (oppS(g, 'fg3a') || 0); if (a === 0 || !(g.shotLog || []).some(x => x.team === 'opp')) return null; return [(oppS(g, 'fg2m') || 0) + (oppS(g, 'fg3m') || 0), a]; } },
             { key: 'oppFta', label: 'Opponent free throw attempts', better: 'lower', fmt: 'num', parts: g => [oppS(g, 'fta') || 0, 1] },
             { key: 'pf', label: 'Fouls committed', better: 'lower', fmt: 'num', parts: g => [sumP(g, 'pf'), 1] }
         ];
@@ -1714,7 +1718,7 @@
                 showToast(`${teamName(activeTeam)} goals saved`, "success");
             };
             // Live game as a game-shaped object, so Quick summary can check goals mid-game.
-            const liveGameForGoals = { stats: Object.entries(playerStats).map(([name, st]) => ({ name, ...st })), opponentStats, teamScore: getTeamScore(), oppScore: gameMeta.oppScore };
+            const liveGameForGoals = { stats: Object.entries(playerStats).map(([name, st]) => ({ name, ...st })), opponentStats, shotLog, teamScore: getTeamScore(), oppScore: gameMeta.oppScore };
 
             // Weekly gut check: one entry per team per week (week starts Monday).
             const weekKey = weekStartKey();
