@@ -185,6 +185,7 @@ footer{margin-top:18px;color:var(--muted);font-size:.85rem}
         <div><svg viewBox="0 0 38 12"><line x1="2" y1="6" x2="30" y2="6" stroke="#f59e0b" stroke-width="3"/><path d="M30 2 L37 6 L30 10 Z" fill="#f59e0b"/></svg>My spot's move</div>
         <div><svg viewBox="0 0 38 12"><line x1="13" y1="1" x2="23" y2="11" stroke="#ef4444" stroke-width="3" stroke-linecap="round"/><line x1="13" y1="11" x2="23" y2="1" stroke="#ef4444" stroke-width="3" stroke-linecap="round"/></svg>Defender (red)</div>
         <div><svg viewBox="0 0 38 12"><line x1="2" y1="6" x2="30" y2="6" stroke="#ef4444" stroke-width="3"/><path d="M30 2 L37 6 L30 10 Z" fill="#ef4444"/></svg>Defense move</div>
+        <div><svg viewBox="0 0 38 12"><circle cx="19" cy="6" r="4.5" fill="none" stroke="#fde047" stroke-width="2.5"/></svg>Stuck on a screen</div>
       </div>
     </div>
   </div>
@@ -266,8 +267,11 @@ const involves = (m, p) => m.type === 'pass' ? (m.from == p || m.to == p) : m.p 
    play.defense = { type: 'man' | 'zone', start: {1: [x, y], ...} (optional), on: {1: 1, ...} (optional) }
    step.dmoves  = [{ p: 3, to: [x, y], on: 4 (optional: X3 now guards 4, a switch) }]
    Man: each defender stays with their player (between them and the rim, sagging toward the ball)
-   unless the coach moves them that step. A defender whose player runs off a screen gets hung up
-   and trails a few steps behind, then catches up. Zone: defenders hold their spots unless the coach moves them.
+   unless the coach moves them that step.
+   Screens: a defender whose player runs off a screen chases on her hip, runs into the screener and
+   gets stuck there while the cutter gets open. Next step she fights over the top to catch up.
+   When the screen and the cut are in the same step, the screener gets there first and the cutter
+   waits for it (see timing()). Zone: defenders hold their spots unless the coach moves them.
    Plays without play.defense show no defense, so every older play still looks the same. */
 const DEF_RIM = [250, 62.5];
 const DEF_ZONE = { 1: [185, 210], 2: [315, 210], 3: [95, 105], 4: [405, 105], 5: [250, 100] };
@@ -280,19 +284,39 @@ function defGuardSpot(man, ballPt, hasBall) {
 }
 function makeDefense(stateAt, movePts, along) {
   const ballPt = st => (st.ball == null || !st.pos[st.ball]) ? DEF_RIM : st.pos[st.ball];
-  const LAG = 0.3; // how far behind a screened defender trails (share of the cut)
+  const CONTACT = 26; // court units (2.6 ft) short of the screen spot: where the defender bumps into the screener
   const nearPath = (pt, pts) => { let best = Infinity; for (let i = 1; i < pts.length; i++) { const a = pts[i - 1], b = pts[i], dx = b[0] - a[0], dy = b[1] - a[1], L2 = dx * dx + dy * dy || 1, u = Math.max(0, Math.min(1, ((pt[0] - a[0]) * dx + (pt[1] - a[1]) * dy) / L2)); best = Math.min(best, Math.hypot(pt[0] - a[0] - dx * u, pt[1] - a[1] - dy * u)); } return best; };
-  // players who run off a screen in step i (screens set this step or the step before), with their path
+  const plen = pts => { let L = 0; for (let i = 1; i < pts.length; i++) L += Math.hypot(pts[i][0] - pts[i - 1][0], pts[i][1] - pts[i - 1][1]); return L; };
+  // how far along a path (0..1) it passes closest to a point
+  const closestF = (pt, pts) => { const L = plen(pts) || 1; let best = Infinity, bf = 0, acc = 0; for (let i = 1; i < pts.length; i++) { const a = pts[i - 1], b = pts[i], dx = b[0] - a[0], dy = b[1] - a[1], seg = Math.hypot(dx, dy), L2 = seg * seg || 1, u = Math.max(0, Math.min(1, ((pt[0] - a[0]) * dx + (pt[1] - a[1]) * dy) / L2)), d = Math.hypot(pt[0] - a[0] - dx * u, pt[1] - a[1] - dy * u); if (d < best) { best = d; bf = (acc + seg * u) / L; } acc += seg; } return bf; };
+  // players who run off a screen in step i (screens set this step or the step before): their path,
+  // the screen spot, and how far along the path the defender gets before running into the screener
   function screenUsers(play, i) {
     const step = play.steps[i] || {}, prev = play.steps[i - 1] || {}, base = stateAt(play, i), out = {};
-    const spots = [...(step.moves || []), ...(prev.moves || [])].filter(m => m.type === 'screen' && m.to);
+    const spots = [...(step.moves || []).map(m => ({ m, now: true })), ...(prev.moves || []).map(m => ({ m, now: false }))].filter(x => x.m.type === 'screen' && x.m.to);
     if (!spots.length) return out;
     for (const m of step.moves || []) {
       if (m.type === 'pass' || m.type === 'shot' || m.type === 'screen' || !base.pos[m.p]) continue;
-      const pts = movePts(base.pos[m.p], m);
-      if (spots.some(s => s.p != m.p && nearPath(s.to, pts) < 90)) out[m.p] = pts;
+      const pts = movePts(base.pos[m.p], m), sc = spots.find(x => x.m.p != m.p && nearPath(x.m.to, pts) < 90);
+      if (!sc) continue;
+      const L = plen(pts) || 1, fS = closestF(sc.m.to, pts), fStop = Math.max(0, fS - CONTACT / L);
+      const at = along(pts, fStop), dir = along(pts, Math.min(1, fS + 0.02)), dx = dir[0] - at[0], dy = dir[1] - at[1], dl = Math.hypot(dx, dy) || 1;
+      const contact = [sc.m.to[0] - dx / dl * CONTACT, sc.m.to[1] - dy / dl * CONTACT];
+      out[m.p] = { m, pts, spot: sc.m.to, by: sc.m.p, now: sc.now, fStop, contact };
     }
     return out;
+  }
+  // NEW: timing inside a step. A screen and a cut off it in the same step: the screener gets set
+  // in the first half, the cutter waits, then goes. Everything else moves the whole step.
+  function timing(play, k) {
+    const users = screenUsers(play, k), setters = {};
+    for (const p in users) if (users[p].now) setters[users[p].by] = true;
+    return (m, e) => {
+      if (!m || m.type === 'pass' || m.type === 'shot') return e;
+      if (m.type === 'screen' && setters[m.p]) return Math.min(1, e / 0.5);
+      if (users[m.p] && users[m.p].now) return Math.max(0, Math.min(1, (e - 0.45) / 0.55));
+      return e;
+    };
   }
   const has = play => !!(play && play.defense && play.defense.type);
   function start(play) {
@@ -302,30 +326,40 @@ function makeDefense(stateAt, movePts, along) {
       const s = d.start && d.start[p], man = st.pos[on[p]];
       pos[p] = s ? [...s] : (d.type === 'man' && man) ? defGuardSpot(man, ballPt(st), st.ball == on[p]) : [...DEF_ZONE[p]];
     }
-    return { pos, on };
+    return { pos, on, stuck: d.stuck ? { ...d.stuck } : {} };
   }
   function endOf(play, i, ds) {
-    const step = play.steps[i] || {}, after = stateAt(play, i + 1), pos = {}, on = { ...ds.on }, users = screenUsers(play, i);
+    const step = play.steps[i] || {}, after = stateAt(play, i + 1), pos = {}, on = { ...ds.on }, users = screenUsers(play, i), stuck = {};
     for (const p in ds.pos) {
       const dm = (step.dmoves || []).find(m => m.p == p);
       if (dm) { pos[p] = [...dm.to]; if (dm.on) on[p] = +dm.on; }
-      else if (play.defense.type === 'man' && users[on[p]]) pos[p] = defGuardSpot(along(users[on[p]], 1 - LAG), ballPt(after), false);
+      else if (play.defense.type === 'man' && users[on[p]]) { pos[p] = [...users[on[p]].contact]; stuck[p] = users[on[p]].spot; }
       else if (play.defense.type === 'man' && after.pos[on[p]]) pos[p] = defGuardSpot(after.pos[on[p]], ballPt(after), after.ball == on[p]);
       else pos[p] = [...ds.pos[p]];
     }
-    return { pos, on };
+    return { pos, on, stuck };
   }
   // where the defense is at the START of step k
   function at(play, k) { let ds = start(play); for (let i = 0; i < k && i < play.steps.length; i++) ds = endOf(play, i, ds); return ds; }
   // where the defense is at eased progress e through step k. offNow: offense right now. ball: { pt, holder }
   function frame(play, k, e, offNow, ball) {
-    const ds = at(play, k), step = play.steps[k] || {}, st = stateAt(play, k), pos = {}, on = { ...ds.on }, users = screenUsers(play, k);
+    const ds = at(play, k), step = play.steps[k] || {}, st = stateAt(play, k), pos = {}, on = { ...ds.on }, users = screenUsers(play, k), tm = timing(play, k), bump = {};
     for (const p in ds.pos) {
-      const dm = (step.dmoves || []).find(m => m.p == p), a = ds.pos[p], man = on[p];
+      const dm = (step.dmoves || []).find(m => m.p == p), a = ds.pos[p], man = on[p], u = users[man];
       if (dm) { pos[p] = e > 0 ? along(movePts(a, dm), e) : [...a]; if (dm.on && e >= 0.5) on[p] = +dm.on; }
-      else if (play.defense.type === 'man' && users[man] && e > 0) {
-        const g0 = defGuardSpot(st.pos[man], ballPt(st), st.ball == man), g1 = defGuardSpot(along(users[man], e * (1 - LAG)), ball && ball.pt, false);
-        pos[p] = [g1[0] + (a[0] - g0[0]) * (1 - e), g1[1] + (a[1] - g0[1]) * (1 - e)];
+      else if (play.defense.type === 'man' && u && e > 0) {
+        // chase on the cutter's hip, then run into the screener and stay stuck there
+        const f = Math.min(tm(u.m, e), u.fStop), w = u.fStop > 0 ? f / u.fStop : 1, base = along(u.pts, f), end = along(u.pts, u.fStop), s0 = u.pts[0];
+        pos[p] = [base[0] + (a[0] - s0[0]) * (1 - w) + (u.contact[0] - end[0]) * w, base[1] + (a[1] - s0[1]) * (1 - w) + (u.contact[1] - end[1]) * w];
+        if (w >= 1) bump[p] = { at: u.contact, spot: u.spot, by: u.by };
+      }
+      else if (play.defense.type === 'man' && ds.stuck && ds.stuck[p] && offNow[man] && e > 0) {
+        // stuck last step: fight over the top of the screen (away from the rim) to get back to her player
+        const g1 = defGuardSpot(offNow[man], ball && ball.pt, ball && ball.holder == man), S = ds.stuck[p];
+        const dx = g1[0] - a[0], dy = g1[1] - a[1], L = Math.hypot(dx, dy) || 1;
+        let nx = -dy / L, ny = dx / L;
+        if (Math.hypot(S[0] + nx - DEF_RIM[0], S[1] + ny - DEF_RIM[1]) < Math.hypot(S[0] - nx - DEF_RIM[0], S[1] - ny - DEF_RIM[1])) { nx = -nx; ny = -ny; }
+        pos[p] = along(movePts(a, { to: g1, bend: { x: S[0] + nx * 30, y: S[1] + ny * 30 } }), e);
       }
       else if (play.defense.type === 'man' && offNow[man] && st.pos[man] && e > 0) {
         const g0 = defGuardSpot(st.pos[man], ballPt(st), st.ball == man);
@@ -333,13 +367,13 @@ function makeDefense(stateAt, movePts, along) {
         pos[p] = [g1[0] + (a[0] - g0[0]) * (1 - e), g1[1] + (a[1] - g0[1]) * (1 - e)];
       } else pos[p] = [...a];
     }
-    return { pos, on };
+    return { pos, on, bump };
   }
   // the defender guarding offensive player n (for screens: who is getting screened)
   const guarding = (ds, n) => { for (const p in ds.on) if (ds.on[p] == n) return p; return null; };
   // an option (read) starts where the defense is right after main step "from"
-  const forOption = (play, from) => { if (!has(play)) return undefined; const ds = at(play, from + 1); return { type: play.defense.type, start: ds.pos, on: ds.on }; };
-  return { has, start, at, frame, guarding, forOption };
+  const forOption = (play, from) => { if (!has(play)) return undefined; const ds = at(play, from + 1); return { type: play.defense.type, start: ds.pos, on: ds.on, stuck: ds.stuck }; };
+  return { has, start, at, frame, guarding, forOption, timing };
 }
 const DEF = makeDefense((play, kk) => stateAtMain(play, kk), movePts, along);
 let showD = true; // NEW: show the defense (only plays that have one)
@@ -349,7 +383,8 @@ function frame(k, t) {
   const st = stateAt(k), step = VIEW.steps[k], e = ease(t), pos = {};
   for (const p in st.pos) pos[p] = [...st.pos[p]];
   let ball = st.ball == null ? { atRim: true } : { holder: st.ball };
-  for (const m of step.moves) if (m.type !== 'pass' && m.type !== 'shot') pos[m.p] = along(movePts(st.pos[m.p], m), e);
+  const tm = DEF.timing(VIEW, k); // NEW: a cutter waits for a screen set in the same step
+  for (const m of step.moves) if (m.type !== 'pass' && m.type !== 'shot') pos[m.p] = along(movePts(st.pos[m.p], m), tm(m, e));
   for (const m of step.moves) if (m.type === 'pass') { const a = st.pos[m.from], b = pos[m.to]; ball = e >= 1 ? { holder: m.to } : { from: a, to: b, e }; }
   // NEW: shot. The ball arcs from the shooter's hands to the rim, then drops through the net.
   for (const m of step.moves) if (m.type === 'shot' && st.pos[m.p]) ball = t >= 1 ? { atRim: true } : { shot: pos[m.p], t };
@@ -456,6 +491,8 @@ for (const p of [1, 2, 3, 4, 5]) {
   grp.add(legs, body, arms, head, tag); grp.visible = false; scene.add(grp);
   defenders[p] = { grp, tag, mats: [jersey, legMat, headMat] };
 }
+// NEW: a yellow burst on the floor when a defender runs into a screen
+const bumps = [1, 2, 3, 4, 5].map(() => { const m = new THREE.Mesh(new THREE.RingGeometry(0.6, 1.5, 12), new THREE.MeshBasicMaterial({ color: 0xfde047, transparent: true, opacity: 0.9, side: THREE.DoubleSide, depthWrite: false })); m.rotation.x = -Math.PI / 2; m.visible = false; scene.add(m); return m; });
 const ball = new THREE.Mesh(new THREE.SphereGeometry(0.55, 18, 14), new THREE.MeshLambertMaterial({ color: 0xff7a1a, emissive: 0x3a1500 })); scene.add(ball);
 
 /* ---------- NEW: floor markings for every move this step ----------
@@ -663,7 +700,8 @@ function draw() {
     pl.grp.position.copy(v);
     // face the direction of travel while moving; screeners face the player they're screening for;
     // everyone else faces the basket. Turning is smoothed so nobody snaps around.
-    let look = f.moving.has(p) ? W(...along(movePts(stateAt(k).pos[p], VIEW.steps[k].moves.find(m => m.p == p)), Math.min(1, ease(t) + 0.05))) : W(250, 62.5);
+    const mv = f.moving.has(p) && VIEW.steps[k].moves.find(m => m.p == p);
+    let look = mv ? W(...along(movePts(stateAt(k).pos[p], mv), Math.min(1, DEF.timing(VIEW, k)(mv, ease(t)) + 0.05))) : W(250, 62.5);
     const tgt = screenTarget(p, f, ds);
     if (tgt) look = tgt;
     const want = Math.atan2(look.x - v.x, look.z - v.z);
@@ -681,6 +719,8 @@ function draw() {
   }
   // NEW: defenders. Each faces the player they guard (zone: faces the ball). With a number picked,
   // the defender guarding you stays solid and the rest fade.
+  bumps.forEach(b => { b.visible = false; });
+  if (ds && showD) Object.values(ds.bump || {}).forEach((b, i) => { const m = bumps[i]; if (!m) return; m.visible = true; m.position.copy(W(b.at[0] + (b.spot[0] - b.at[0]) * 0.42, b.at[1] + (b.spot[1] - b.at[1]) * 0.42, 0.12)); const s = 1 + 0.25 * Math.sin(performance.now() / 90); m.scale.set(s, s, s); });
   for (const p in defenders) {
     const d = defenders[p];
     d.grp.visible = !!(ds && showD && ds.pos[p]);
