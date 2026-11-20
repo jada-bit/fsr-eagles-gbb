@@ -3211,8 +3211,11 @@ service cloud.firestore {
            play.defense = { type: 'man' | 'zone', start: {1: [x, y], ...} (optional), on: {1: 1, ...} (optional) }
            step.dmoves  = [{ p: 3, to: [x, y], on: 4 (optional: X3 now guards 4, a switch) }]
            Man: each defender stays with their player (between them and the rim, sagging toward the ball)
-           unless the coach moves them that step. A defender whose player runs off a screen gets hung up
-           and trails a few steps behind, then catches up. Zone: defenders hold their spots unless the coach moves them.
+           unless the coach moves them that step.
+           Screens: a defender whose player runs off a screen chases on her hip, runs into the screener and
+           gets stuck there while the cutter gets open. Next step she fights over the top to catch up.
+           When the screen and the cut are in the same step, the screener gets there first and the cutter
+           waits for it (see timing()). Zone: defenders hold their spots unless the coach moves them.
            Plays without play.defense show no defense, so every older play still looks the same. */
         const DEF_RIM = [250, 62.5];
         const DEF_ZONE = { 1: [185, 210], 2: [315, 210], 3: [95, 105], 4: [405, 105], 5: [250, 100] };
@@ -3225,19 +3228,39 @@ service cloud.firestore {
         }
         function makeDefense(stateAt, movePts, along) {
           const ballPt = st => (st.ball == null || !st.pos[st.ball]) ? DEF_RIM : st.pos[st.ball];
-          const LAG = 0.3; // how far behind a screened defender trails (share of the cut)
+          const CONTACT = 26; // court units (2.6 ft) short of the screen spot: where the defender bumps into the screener
           const nearPath = (pt, pts) => { let best = Infinity; for (let i = 1; i < pts.length; i++) { const a = pts[i - 1], b = pts[i], dx = b[0] - a[0], dy = b[1] - a[1], L2 = dx * dx + dy * dy || 1, u = Math.max(0, Math.min(1, ((pt[0] - a[0]) * dx + (pt[1] - a[1]) * dy) / L2)); best = Math.min(best, Math.hypot(pt[0] - a[0] - dx * u, pt[1] - a[1] - dy * u)); } return best; };
-          // players who run off a screen in step i (screens set this step or the step before), with their path
+          const plen = pts => { let L = 0; for (let i = 1; i < pts.length; i++) L += Math.hypot(pts[i][0] - pts[i - 1][0], pts[i][1] - pts[i - 1][1]); return L; };
+          // how far along a path (0..1) it passes closest to a point
+          const closestF = (pt, pts) => { const L = plen(pts) || 1; let best = Infinity, bf = 0, acc = 0; for (let i = 1; i < pts.length; i++) { const a = pts[i - 1], b = pts[i], dx = b[0] - a[0], dy = b[1] - a[1], seg = Math.hypot(dx, dy), L2 = seg * seg || 1, u = Math.max(0, Math.min(1, ((pt[0] - a[0]) * dx + (pt[1] - a[1]) * dy) / L2)), d = Math.hypot(pt[0] - a[0] - dx * u, pt[1] - a[1] - dy * u); if (d < best) { best = d; bf = (acc + seg * u) / L; } acc += seg; } return bf; };
+          // players who run off a screen in step i (screens set this step or the step before): their path,
+          // the screen spot, and how far along the path the defender gets before running into the screener
           function screenUsers(play, i) {
             const step = play.steps[i] || {}, prev = play.steps[i - 1] || {}, base = stateAt(play, i), out = {};
-            const spots = [...(step.moves || []), ...(prev.moves || [])].filter(m => m.type === 'screen' && m.to);
+            const spots = [...(step.moves || []).map(m => ({ m, now: true })), ...(prev.moves || []).map(m => ({ m, now: false }))].filter(x => x.m.type === 'screen' && x.m.to);
             if (!spots.length) return out;
             for (const m of step.moves || []) {
               if (m.type === 'pass' || m.type === 'shot' || m.type === 'screen' || !base.pos[m.p]) continue;
-              const pts = movePts(base.pos[m.p], m);
-              if (spots.some(s => s.p != m.p && nearPath(s.to, pts) < 90)) out[m.p] = pts;
+              const pts = movePts(base.pos[m.p], m), sc = spots.find(x => x.m.p != m.p && nearPath(x.m.to, pts) < 90);
+              if (!sc) continue;
+              const L = plen(pts) || 1, fS = closestF(sc.m.to, pts), fStop = Math.max(0, fS - CONTACT / L);
+              const at = along(pts, fStop), dir = along(pts, Math.min(1, fS + 0.02)), dx = dir[0] - at[0], dy = dir[1] - at[1], dl = Math.hypot(dx, dy) || 1;
+              const contact = [sc.m.to[0] - dx / dl * CONTACT, sc.m.to[1] - dy / dl * CONTACT];
+              out[m.p] = { m, pts, spot: sc.m.to, by: sc.m.p, now: sc.now, fStop, contact };
             }
             return out;
+          }
+          // NEW: timing inside a step. A screen and a cut off it in the same step: the screener gets set
+          // in the first half, the cutter waits, then goes. Everything else moves the whole step.
+          function timing(play, k) {
+            const users = screenUsers(play, k), setters = {};
+            for (const p in users) if (users[p].now) setters[users[p].by] = true;
+            return (m, e) => {
+              if (!m || m.type === 'pass' || m.type === 'shot') return e;
+              if (m.type === 'screen' && setters[m.p]) return Math.min(1, e / 0.5);
+              if (users[m.p] && users[m.p].now) return Math.max(0, Math.min(1, (e - 0.45) / 0.55));
+              return e;
+            };
           }
           const has = play => !!(play && play.defense && play.defense.type);
           function start(play) {
@@ -3247,30 +3270,40 @@ service cloud.firestore {
               const s = d.start && d.start[p], man = st.pos[on[p]];
               pos[p] = s ? [...s] : (d.type === 'man' && man) ? defGuardSpot(man, ballPt(st), st.ball == on[p]) : [...DEF_ZONE[p]];
             }
-            return { pos, on };
+            return { pos, on, stuck: d.stuck ? { ...d.stuck } : {} };
           }
           function endOf(play, i, ds) {
-            const step = play.steps[i] || {}, after = stateAt(play, i + 1), pos = {}, on = { ...ds.on }, users = screenUsers(play, i);
+            const step = play.steps[i] || {}, after = stateAt(play, i + 1), pos = {}, on = { ...ds.on }, users = screenUsers(play, i), stuck = {};
             for (const p in ds.pos) {
               const dm = (step.dmoves || []).find(m => m.p == p);
               if (dm) { pos[p] = [...dm.to]; if (dm.on) on[p] = +dm.on; }
-              else if (play.defense.type === 'man' && users[on[p]]) pos[p] = defGuardSpot(along(users[on[p]], 1 - LAG), ballPt(after), false);
+              else if (play.defense.type === 'man' && users[on[p]]) { pos[p] = [...users[on[p]].contact]; stuck[p] = users[on[p]].spot; }
               else if (play.defense.type === 'man' && after.pos[on[p]]) pos[p] = defGuardSpot(after.pos[on[p]], ballPt(after), after.ball == on[p]);
               else pos[p] = [...ds.pos[p]];
             }
-            return { pos, on };
+            return { pos, on, stuck };
           }
           // where the defense is at the START of step k
           function at(play, k) { let ds = start(play); for (let i = 0; i < k && i < play.steps.length; i++) ds = endOf(play, i, ds); return ds; }
           // where the defense is at eased progress e through step k. offNow: offense right now. ball: { pt, holder }
           function frame(play, k, e, offNow, ball) {
-            const ds = at(play, k), step = play.steps[k] || {}, st = stateAt(play, k), pos = {}, on = { ...ds.on }, users = screenUsers(play, k);
+            const ds = at(play, k), step = play.steps[k] || {}, st = stateAt(play, k), pos = {}, on = { ...ds.on }, users = screenUsers(play, k), tm = timing(play, k), bump = {};
             for (const p in ds.pos) {
-              const dm = (step.dmoves || []).find(m => m.p == p), a = ds.pos[p], man = on[p];
+              const dm = (step.dmoves || []).find(m => m.p == p), a = ds.pos[p], man = on[p], u = users[man];
               if (dm) { pos[p] = e > 0 ? along(movePts(a, dm), e) : [...a]; if (dm.on && e >= 0.5) on[p] = +dm.on; }
-              else if (play.defense.type === 'man' && users[man] && e > 0) {
-                const g0 = defGuardSpot(st.pos[man], ballPt(st), st.ball == man), g1 = defGuardSpot(along(users[man], e * (1 - LAG)), ball && ball.pt, false);
-                pos[p] = [g1[0] + (a[0] - g0[0]) * (1 - e), g1[1] + (a[1] - g0[1]) * (1 - e)];
+              else if (play.defense.type === 'man' && u && e > 0) {
+                // chase on the cutter's hip, then run into the screener and stay stuck there
+                const f = Math.min(tm(u.m, e), u.fStop), w = u.fStop > 0 ? f / u.fStop : 1, base = along(u.pts, f), end = along(u.pts, u.fStop), s0 = u.pts[0];
+                pos[p] = [base[0] + (a[0] - s0[0]) * (1 - w) + (u.contact[0] - end[0]) * w, base[1] + (a[1] - s0[1]) * (1 - w) + (u.contact[1] - end[1]) * w];
+                if (w >= 1) bump[p] = { at: u.contact, spot: u.spot, by: u.by };
+              }
+              else if (play.defense.type === 'man' && ds.stuck && ds.stuck[p] && offNow[man] && e > 0) {
+                // stuck last step: fight over the top of the screen (away from the rim) to get back to her player
+                const g1 = defGuardSpot(offNow[man], ball && ball.pt, ball && ball.holder == man), S = ds.stuck[p];
+                const dx = g1[0] - a[0], dy = g1[1] - a[1], L = Math.hypot(dx, dy) || 1;
+                let nx = -dy / L, ny = dx / L;
+                if (Math.hypot(S[0] + nx - DEF_RIM[0], S[1] + ny - DEF_RIM[1]) < Math.hypot(S[0] - nx - DEF_RIM[0], S[1] - ny - DEF_RIM[1])) { nx = -nx; ny = -ny; }
+                pos[p] = along(movePts(a, { to: g1, bend: { x: S[0] + nx * 30, y: S[1] + ny * 30 } }), e);
               }
               else if (play.defense.type === 'man' && offNow[man] && st.pos[man] && e > 0) {
                 const g0 = defGuardSpot(st.pos[man], ballPt(st), st.ball == man);
@@ -3278,13 +3311,13 @@ service cloud.firestore {
                 pos[p] = [g1[0] + (a[0] - g0[0]) * (1 - e), g1[1] + (a[1] - g0[1]) * (1 - e)];
               } else pos[p] = [...a];
             }
-            return { pos, on };
+            return { pos, on, bump };
           }
           // the defender guarding offensive player n (for screens: who is getting screened)
           const guarding = (ds, n) => { for (const p in ds.on) if (ds.on[p] == n) return p; return null; };
           // an option (read) starts where the defense is right after main step "from"
-          const forOption = (play, from) => { if (!has(play)) return undefined; const ds = at(play, from + 1); return { type: play.defense.type, start: ds.pos, on: ds.on }; };
-          return { has, start, at, frame, guarding, forOption };
+          const forOption = (play, from) => { if (!has(play)) return undefined; const ds = at(play, from + 1); return { type: play.defense.type, start: ds.pos, on: ds.on, stuck: ds.stuck }; };
+          return { has, start, at, frame, guarding, forOption, timing };
         }
         const PB_DEF = makeDefense(pbStateAt, pbMovePts, pbAlong);
 
@@ -3300,6 +3333,7 @@ service cloud.firestore {
             const moves = (step.moves || []).map((m, i) => drag && drag.bend === i ? { ...m, bend: { x: drag.pt[0], y: drag.pt[1] } } : m);
             const pos = {}; Object.keys(st.pos).forEach(p => pos[p] = [...st.pos[p]]);
             let holder = st.ball, ballAt = st.ball == null ? [PB_RIM[0], PB_RIM[1] + 14] : (st.pos[st.ball] || [250, 320]), shotLift = 0;
+            const tmg = PB_DEF.timing(play, k); // NEW: a cutter waits for a screen set in the same step
             if (t != null) {
                 const e = t < .5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;
                 moves.forEach(m => {
@@ -3307,16 +3341,17 @@ service cloud.firestore {
                     else if (m.type === 'pass') {
                         const a = st.pos[m.from], recv = moves.find(x => x.p == m.to && x.type !== 'pass'), b = recv ? recv.to : st.pos[m.to];
                         if (a && b) { ballAt = [a[0] + (b[0] - a[0]) * e, a[1] + (b[1] - a[1]) * e]; holder = e >= 1 ? m.to : null; }
-                    } else if (st.pos[m.p]) pos[m.p] = pbAlong(pbMovePts(st.pos[m.p], m), e);
+                    } else if (st.pos[m.p]) pos[m.p] = pbAlong(pbMovePts(st.pos[m.p], m), tmg(m, e));
                 });
             }
             if (drag && dragMode === 'place' && drag.p != null) pos[drag.p] = drag.pts[drag.pts.length - 1];
             // NEW: defense (red X's). Only plays with a defense set show it.
             const hasD = PB_DEF.has(play), dst = hasD ? PB_DEF.at(play, k) : null;
-            let dpos = null;
+            let dpos = null, dbump = {};
             if (hasD) {
                 const e = t == null ? 0 : (t < .5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2);
-                dpos = PB_DEF.frame(play, k, e, pos, { pt: holder != null && pos[holder] ? pos[holder] : ballAt, holder }).pos;
+                const fr = PB_DEF.frame(play, k, e, pos, { pt: holder != null && pos[holder] ? pos[holder] : ballAt, holder });
+                dpos = fr.pos; dbump = fr.bump || {};
                 if (drag && drag.dp != null) dpos[drag.dp] = drag.pts[drag.pts.length - 1];
             }
             const dArrows = hasD && t == null ? (step.dmoves || []).map((m, i) => {
@@ -3436,6 +3471,7 @@ service cloud.firestore {
                             </g>
                         );
                     })}
+                    {Object.keys(dbump).map(p => { const b = dbump[p], cx = b.at[0] + (b.spot[0] - b.at[0]) * 0.42, cy = b.at[1] + (b.spot[1] - b.at[1]) * 0.42; return <polygon key={'b' + p} points={Array.from({ length: 16 }, (_, i) => { const r = i % 2 ? 5 : 12, an = i / 16 * Math.PI * 2; return `${cx + Math.cos(an) * r},${cy + Math.sin(an) * r}`; }).join(' ')} fill="#fde047" stroke="#dc2626" strokeWidth="2" pointerEvents="none" />; })}
                     {drib && <ellipse cx={bx + 2} cy={by + 3} rx={ballR * .9} ry={ballR * .45} fill="rgba(0,0,0,.25)" pointerEvents="none" />}
                     <circle cx={bx} cy={by} r={ballR} fill="#f97316" stroke="#111" strokeWidth="1.5" pointerEvents="none" />
                     {onBend && t == null && moves.map((m, i) => {
