@@ -3207,11 +3207,91 @@ service cloud.firestore {
             }).map(p => p.join(',')).join(' ');
         };
         const PB_MOVE_LABEL = { cut: 'cuts to', dribble: 'dribbles to', screen: 'sets a screen at', pass: 'passes to' };
+        /* ---------- NEW: defense (the same code is in index.html, playbook.html and playbook-3d.html) ----------
+           play.defense = { type: 'man' | 'zone', start: {1: [x, y], ...} (optional), on: {1: 1, ...} (optional) }
+           step.dmoves  = [{ p: 3, to: [x, y], on: 4 (optional: X3 now guards 4, a switch) }]
+           Man: each defender stays with their player (between them and the rim, sagging toward the ball)
+           unless the coach moves them that step. A defender whose player runs off a screen gets hung up
+           and trails a few steps behind, then catches up. Zone: defenders hold their spots unless the coach moves them.
+           Plays without play.defense show no defense, so every older play still looks the same. */
+        const DEF_RIM = [250, 62.5];
+        const DEF_ZONE = { 1: [185, 210], 2: [315, 210], 3: [95, 105], 4: [405, 105], 5: [250, 100] };
+        function defGuardSpot(man, ballPt, hasBall) {
+          const dx = DEF_RIM[0] - man[0], dy = DEF_RIM[1] - man[1], d = Math.hypot(dx, dy) || 1;
+          const off = Math.min(hasBall ? 30 : 40, d * 0.45);
+          let x = man[0] + dx / d * off, y = man[1] + dy / d * off;
+          if (!hasBall && ballPt) { x += (ballPt[0] - man[0]) * 0.15; y += (ballPt[1] - man[1]) * 0.15; }
+          return [Math.round(x), Math.round(y)];
+        }
+        function makeDefense(stateAt, movePts, along) {
+          const ballPt = st => (st.ball == null || !st.pos[st.ball]) ? DEF_RIM : st.pos[st.ball];
+          const LAG = 0.3; // how far behind a screened defender trails (share of the cut)
+          const nearPath = (pt, pts) => { let best = Infinity; for (let i = 1; i < pts.length; i++) { const a = pts[i - 1], b = pts[i], dx = b[0] - a[0], dy = b[1] - a[1], L2 = dx * dx + dy * dy || 1, u = Math.max(0, Math.min(1, ((pt[0] - a[0]) * dx + (pt[1] - a[1]) * dy) / L2)); best = Math.min(best, Math.hypot(pt[0] - a[0] - dx * u, pt[1] - a[1] - dy * u)); } return best; };
+          // players who run off a screen in step i (screens set this step or the step before), with their path
+          function screenUsers(play, i) {
+            const step = play.steps[i] || {}, prev = play.steps[i - 1] || {}, base = stateAt(play, i), out = {};
+            const spots = [...(step.moves || []), ...(prev.moves || [])].filter(m => m.type === 'screen' && m.to);
+            if (!spots.length) return out;
+            for (const m of step.moves || []) {
+              if (m.type === 'pass' || m.type === 'shot' || m.type === 'screen' || !base.pos[m.p]) continue;
+              const pts = movePts(base.pos[m.p], m);
+              if (spots.some(s => s.p != m.p && nearPath(s.to, pts) < 90)) out[m.p] = pts;
+            }
+            return out;
+          }
+          const has = play => !!(play && play.defense && play.defense.type);
+          function start(play) {
+            const d = play.defense, st = stateAt(play, 0), pos = {}, on = {};
+            for (const p of [1, 2, 3, 4, 5]) {
+              on[p] = +((d.on && d.on[p]) || p);
+              const s = d.start && d.start[p], man = st.pos[on[p]];
+              pos[p] = s ? [...s] : (d.type === 'man' && man) ? defGuardSpot(man, ballPt(st), st.ball == on[p]) : [...DEF_ZONE[p]];
+            }
+            return { pos, on };
+          }
+          function endOf(play, i, ds) {
+            const step = play.steps[i] || {}, after = stateAt(play, i + 1), pos = {}, on = { ...ds.on }, users = screenUsers(play, i);
+            for (const p in ds.pos) {
+              const dm = (step.dmoves || []).find(m => m.p == p);
+              if (dm) { pos[p] = [...dm.to]; if (dm.on) on[p] = +dm.on; }
+              else if (play.defense.type === 'man' && users[on[p]]) pos[p] = defGuardSpot(along(users[on[p]], 1 - LAG), ballPt(after), false);
+              else if (play.defense.type === 'man' && after.pos[on[p]]) pos[p] = defGuardSpot(after.pos[on[p]], ballPt(after), after.ball == on[p]);
+              else pos[p] = [...ds.pos[p]];
+            }
+            return { pos, on };
+          }
+          // where the defense is at the START of step k
+          function at(play, k) { let ds = start(play); for (let i = 0; i < k && i < play.steps.length; i++) ds = endOf(play, i, ds); return ds; }
+          // where the defense is at eased progress e through step k. offNow: offense right now. ball: { pt, holder }
+          function frame(play, k, e, offNow, ball) {
+            const ds = at(play, k), step = play.steps[k] || {}, st = stateAt(play, k), pos = {}, on = { ...ds.on }, users = screenUsers(play, k);
+            for (const p in ds.pos) {
+              const dm = (step.dmoves || []).find(m => m.p == p), a = ds.pos[p], man = on[p];
+              if (dm) { pos[p] = e > 0 ? along(movePts(a, dm), e) : [...a]; if (dm.on && e >= 0.5) on[p] = +dm.on; }
+              else if (play.defense.type === 'man' && users[man] && e > 0) {
+                const g0 = defGuardSpot(st.pos[man], ballPt(st), st.ball == man), g1 = defGuardSpot(along(users[man], e * (1 - LAG)), ball && ball.pt, false);
+                pos[p] = [g1[0] + (a[0] - g0[0]) * (1 - e), g1[1] + (a[1] - g0[1]) * (1 - e)];
+              }
+              else if (play.defense.type === 'man' && offNow[man] && st.pos[man] && e > 0) {
+                const g0 = defGuardSpot(st.pos[man], ballPt(st), st.ball == man);
+                const g1 = defGuardSpot(offNow[man], ball && ball.pt, ball && ball.holder == man);
+                pos[p] = [g1[0] + (a[0] - g0[0]) * (1 - e), g1[1] + (a[1] - g0[1]) * (1 - e)];
+              } else pos[p] = [...a];
+            }
+            return { pos, on };
+          }
+          // the defender guarding offensive player n (for screens: who is getting screened)
+          const guarding = (ds, n) => { for (const p in ds.on) if (ds.on[p] == n) return p; return null; };
+          // an option (read) starts where the defense is right after main step "from"
+          const forOption = (play, from) => { if (!has(play)) return undefined; const ds = at(play, from + 1); return { type: play.defense.type, start: ds.pos, on: ds.on }; };
+          return { has, start, at, frame, guarding, forOption };
+        }
+        const PB_DEF = makeDefense(pbStateAt, pbMovePts, pbAlong);
 
         // The court with players, ball, and this step's arrows. t (0..1) animates the step.
         // dragMode 'place' drags players to their starting spots. dragMode 'path' draws a curved path
         // by dragging from a player. A short tap still works as a tap.
-        function PlayCourtSVG({ play, k, t, onCourtTap, onPlayerTap, selected, dragMode, onDragDone, onBend }) {
+        function PlayCourtSVG({ play, k, t, onCourtTap, onPlayerTap, selected, dragMode, onDragDone, onBend, onDefDragDone }) {
             const svgRef = React.useRef(null);
             const suppressClick = React.useRef(false);
             const [drag, setDrag] = React.useState(null); // { p, pts } or { bend: moveIndex, pt }
@@ -3230,7 +3310,19 @@ service cloud.firestore {
                     } else if (st.pos[m.p]) pos[m.p] = pbAlong(pbMovePts(st.pos[m.p], m), e);
                 });
             }
-            if (drag && dragMode === 'place') pos[drag.p] = drag.pts[drag.pts.length - 1];
+            if (drag && dragMode === 'place' && drag.p != null) pos[drag.p] = drag.pts[drag.pts.length - 1];
+            // NEW: defense (red X's). Only plays with a defense set show it.
+            const hasD = PB_DEF.has(play), dst = hasD ? PB_DEF.at(play, k) : null;
+            let dpos = null;
+            if (hasD) {
+                const e = t == null ? 0 : (t < .5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2);
+                dpos = PB_DEF.frame(play, k, e, pos, { pt: holder != null && pos[holder] ? pos[holder] : ballAt, holder }).pos;
+                if (drag && drag.dp != null) dpos[drag.dp] = drag.pts[drag.pts.length - 1];
+            }
+            const dArrows = hasD && t == null ? (step.dmoves || []).map((m, i) => {
+                const a = dst.pos[m.p]; if (!a) return null;
+                return <polyline key={'d' + i} points={pbTrim(pbMovePts(a, m), 4).map(q => q.join(',')).join(' ')} fill="none" stroke="#dc2626" strokeWidth="3" markerEnd="url(#pbAhD)" />;
+            }) : null;
             const toCourt = (e) => {
                 const pt = svgRef.current.createSVGPoint(); pt.x = e.clientX; pt.y = e.clientY;
                 const loc = pt.matrixTransform(svgRef.current.getScreenCTM().inverse());
@@ -3242,10 +3334,17 @@ service cloud.firestore {
                 onCourtTap(toCourt(e));
             };
             const down = (p) => (e) => {
-                if (!dragMode || !svgRef.current) return;
+                if (!dragMode || dragMode === 'def' || !svgRef.current) return;
                 e.stopPropagation(); e.preventDefault();
                 try { svgRef.current.setPointerCapture(e.pointerId); } catch (_) {}
                 setDrag({ p, pts: [pos[p]] });
+            };
+            // NEW: drag a defender (Setup: where they start; Defense tool: where they go this step)
+            const downDef = (p) => (e) => {
+                if (!onDefDragDone || !svgRef.current) return;
+                e.stopPropagation(); e.preventDefault();
+                try { svgRef.current.setPointerCapture(e.pointerId); } catch (_) {}
+                setDrag({ dp: p, pts: [dpos[p]] });
             };
             const downBend = (i) => (e) => {
                 if (!onBend || !svgRef.current) return;
@@ -3264,6 +3363,7 @@ service cloud.firestore {
                 suppressClick.current = true;
                 const d = drag; setDrag(null);
                 if (d.bend != null) { onBend && onBend(d.bend, d.pt); setTimeout(() => { suppressClick.current = false; }, 400); return; }
+                if (d.dp != null) { if (pbLen(d.pts) > 8 && onDefDragDone) onDefDragDone(d.dp, d.pts[d.pts.length - 1].map(Math.round)); setTimeout(() => { suppressClick.current = false; }, 400); return; }
                 if (pbLen(d.pts) > 20 && onDragDone) onDragDone(d.p, d.pts); else if (onPlayerTap) onPlayerTap(d.p);
                 setTimeout(() => { suppressClick.current = false; }, 400);
             };
@@ -3299,7 +3399,7 @@ service cloud.firestore {
             return (
                 <svg ref={svgRef} viewBox="-36 -55 572 495" onClick={click} onPointerMove={move} onPointerUp={up} onPointerCancel={() => setDrag(null)}
                      style={{ width: '100%', height: 'auto', display: 'block', touchAction: dragMode ? 'none' : 'manipulation', cursor: onCourtTap ? 'crosshair' : 'default', userSelect: 'none' }}>
-                    <defs><marker id="pbAh" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 Z" fill="#111" /></marker></defs>
+                    <defs><marker id="pbAh" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 Z" fill="#111" /></marker><marker id="pbAhD" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 Z" fill="#dc2626" /></marker></defs>
                     <rect x="-36" y="-55" width="572" height="495" fill="#3a2c1e" rx="10" />
                     <text x="14" y="-32" fill="#c9a87f" fontSize="14" fontWeight="700">OUT OF BOUNDS</text>
                     <rect x="0" y="10" width="500" height="420" fill="#d9b083" />
@@ -3313,6 +3413,18 @@ service cloud.firestore {
                     <line x1="220" y1="50" x2="280" y2="50" stroke="#222" strokeWidth="5" />
                     <circle cx="250" cy="62.5" r="7.5" fill="none" stroke="#ff6a00" strokeWidth="3" />
                     {arrows}
+                    {dArrows}
+                    {drag && drag.dp != null && dragMode !== 'place' && dst && <line x1={dst.pos[drag.dp][0]} y1={dst.pos[drag.dp][1]} x2={drag.pts[drag.pts.length - 1][0]} y2={drag.pts[drag.pts.length - 1][1]} stroke="#dc2626" strokeWidth="4" strokeLinecap="round" pointerEvents="none" />}
+                    {dpos && Object.keys(dpos).map(p => {
+                        const [x, y] = dpos[p], s2 = 11, live = !!onDefDragDone;
+                        return (
+                            <g key={'x' + p} onPointerDown={downDef(+p)} onClick={(e) => { if (live) e.stopPropagation(); }} style={{ cursor: live ? 'grab' : 'default' }} pointerEvents={live ? 'all' : 'none'}>
+                                {live && <circle cx={x} cy={y} r="20" fill="rgba(220,38,38,.12)" stroke="#dc2626" strokeWidth="1.5" strokeDasharray="3 3" />}
+                                {[[9, '#fff'], [5, '#dc2626']].map(([w, c]) => <g key={w}><line x1={x - s2} y1={y - s2} x2={x + s2} y2={y + s2} stroke={c} strokeWidth={w} strokeLinecap="round" /><line x1={x - s2} y1={y + s2} x2={x + s2} y2={y - s2} stroke={c} strokeWidth={w} strokeLinecap="round" /></g>)}
+                                <text x={x + s2 + 3} y={y + s2 + 6} fontSize="15" fontWeight="800" fill="#dc2626" stroke="#fff" strokeWidth="3" paintOrder="stroke">{p}</text>
+                            </g>
+                        );
+                    })}
                     {drag && dragMode === 'path' && drag.pts && drag.pts.length > 1 && <line x1={drag.pts[0][0]} y1={drag.pts[0][1]} x2={drag.pts[drag.pts.length - 1][0]} y2={drag.pts[drag.pts.length - 1][1]} stroke="#FFB81C" strokeWidth="4" strokeLinecap="round" pointerEvents="none" />}
                     {Object.keys(pos).map(p => {
                         const [x, y] = pos[p], sel = selected == p || (drag && drag.p == p);
@@ -3362,7 +3474,7 @@ service cloud.firestore {
             const vpOf = (d) => {
                 if (!d || ctx == null || !d.options || !d.options[ctx]) return d;
                 const o = d.options[ctx], st = pbStateAt(d, o.from + 1);
-                return { ...d, start: st.pos, ball: st.ball, steps: o.steps };
+                return { ...d, start: st.pos, ball: st.ball, defense: PB_DEF.forOption(d, o.from), steps: o.steps };
             };
             const vp = vpOf(draft);
             const isSetup = ctx == null && k === 0;
@@ -3438,6 +3550,7 @@ service cloud.firestore {
             // Taps on the court and on players
             const onPlayerTap = (p) => {
                 if (isSetup) { setActor(actor === p ? null : p); return; }
+                if (tool === 'defense') return;
                 if (tool === 'shot') { change(d => { S(d)[k].moves = (S(d)[k].moves || []).filter(m => m.p !== p && m.type !== 'shot'); S(d)[k].moves.push({ type: 'shot', p }); }); setActor(null); return; }
                 if (tool === 'pass' && actor != null && actor !== p) {
                     change(d => { S(d)[k].moves = (S(d)[k].moves || []).filter(m => !(m.type === 'pass')); S(d)[k].moves.push({ type: 'pass', from: actor, to: p }); });
@@ -3448,7 +3561,7 @@ service cloud.firestore {
             const onCourtTap = (pt) => {
                 if (actor == null) return;
                 if (isSetup) { change(d => { d.start[actor] = pt; }); return; }
-                if (tool === 'pass') return;
+                if (tool === 'pass' || tool === 'defense') return;
                 change(d => { S(d)[k].moves = (S(d)[k].moves || []).filter(m => m.type === 'pass' || m.p !== actor); S(d)[k].moves.push({ p: actor, type: tool, to: pt }); });
                 setActor(null);
             };
@@ -3457,11 +3570,25 @@ service cloud.firestore {
             const onDragDone = (p, pts) => {
                 const end = pts[pts.length - 1].map(Math.round);
                 if (isSetup) { change(d => { d.start[p] = end; }); setActor(null); return; }
-                if (tool === 'pass') return;
+                if (tool === 'pass' || tool === 'defense') return;
                 change(d => { S(d)[k].moves = (S(d)[k].moves || []).filter(m => m.type === 'pass' || m.p !== p); S(d)[k].moves.push({ p, type: tool, to: end }); });
                 setActor(null);
             };
-            const dragMode = anim ? null : (isSetup ? 'place' : (tool === 'pass' || tool === 'shot' ? null : 'path'));
+            const hasD = PB_DEF.has(draft);
+            const tl = tool === 'defense' && !hasD ? 'cut' : tool; // the Defense tool goes away when the defense is turned off
+            const dragMode = anim ? null : (isSetup ? 'place' : (tl === 'defense' ? 'def' : (tl === 'pass' || tl === 'shot' ? null : 'path')));
+            // NEW: drag a red X. In Setup it sets where that defender starts; on a step it moves them this step.
+            const onDefDragDone = (p, end) => {
+                if (isSetup) { change(d => { d.defense.start = d.defense.start || {}; d.defense.start[p] = end; }); return; }
+                change(d => { const st = S(d)[k]; st.dmoves = (st.dmoves || []).filter(m => m.p != p); st.dmoves.push({ p, to: end }); });
+            };
+            const setDefense = (v) => { change(d => { if (v === 'none') delete d.defense; else d.defense = { ...(d.defense || {}), type: v }; }); if (v === 'none' && tool === 'defense') setTool('cut'); };
+            const printPlays = (list) => {
+                // NEW: hands the plays (drafts too) to the playbook page, which lays them out to print or save as PDF
+                try { localStorage.setItem('eagles_print_plays', JSON.stringify(list.map(({ id, updatedAt, author: au, imported, ...rest }) => rest))); }
+                catch (e) { return showToast("Couldn't get the plays ready to print: " + e.message, "error"); }
+                window.open('playbook.html?print=local', '_blank', 'noopener');
+            };
             // NEW: drag the gold dot on a line to bend it. Dropping it back on the line straightens it.
             const onBend = (i, pt) => change(d => {
                 const m = S(d)[k].moves[i]; if (!m || m.type === 'pass' || m.type === 'shot') return;
@@ -3523,7 +3650,8 @@ service cloud.firestore {
             };
 
             const hint = isSetup
-                ? (actor == null ? 'Drag each player to their starting spot (or tap a player, then tap the spot).' : `Now tap where ${actor} starts.`)
+                ? (actor == null ? `Drag each player to their starting spot (or tap a player, then tap the spot).${hasD ? ' Drag the red X\'s to set the defense.' : ''}` : `Now tap where ${actor} starts.`)
+                : tl === 'defense' ? (draft.defense.type === 'man' ? 'Drag a red X to where that defender goes this step. Defenders you don\'t move stay with their player.' : 'Drag a red X to where that defender goes this step. Defenders you don\'t move stay put.')
                 : tool === 'shot' ? 'Tap the player who shoots.'
                 : tool === 'pass'
                     ? (actor == null ? 'Tap the player passing the ball.' : `Now tap the player ${actor} passes to.`)
@@ -3538,6 +3666,7 @@ service cloud.firestore {
                         </div>
                         <div className="flex gap-2">
                             <a href={TEST_MODE ? 'playbook.html?test' : 'playbook.html'} target="_blank" rel="noopener" className="py-2 px-4 bg-zinc-800 hover:bg-zinc-700 rounded font-black uppercase text-xs">Open player view</a>
+                            <button onClick={() => shownPlays.length ? printPlays(shownPlays) : showToast("No plays to print yet", "error")} className="py-2 px-4 bg-zinc-800 hover:bg-zinc-700 rounded font-black uppercase text-xs">Print / PDF</button>
                             <button onClick={exportPlays} className="py-2 px-4 bg-zinc-800 hover:bg-zinc-700 rounded font-black uppercase text-xs">Export plays</button>
                             <label className="py-2 px-4 bg-zinc-800 hover:bg-zinc-700 rounded font-black uppercase text-xs cursor-pointer">Import plays<input type="file" accept=".json,application/json" onChange={importPlays} className="hidden" /></label>
                             <button onClick={() => open(pbNewPlay())} className="py-2 px-4 bg-gold text-black rounded font-black uppercase text-xs">+ New play</button>
@@ -3584,6 +3713,7 @@ service cloud.firestore {
                         <div className="flex gap-2 flex-wrap">
                             <label className="flex items-center gap-2 text-sm bg-zinc-900 border border-zinc-700 rounded px-3 py-2"><input type="checkbox" checked={!!draft.published} onChange={e => change(d => { d.published = e.target.checked; })} /> Published (players can see it)</label>
                             <button onClick={preview} className="py-2 px-4 bg-zinc-800 rounded font-black uppercase text-xs"><Icon name="play" className="mr-1.5" />Preview</button>
+                            <button onClick={() => printPlays([draft])} className="py-2 px-4 bg-zinc-800 rounded font-black uppercase text-xs">Print / PDF</button>
                             <button onClick={save} className="py-2 px-4 bg-gold text-black rounded font-black uppercase text-xs">{dirty ? 'Save play' : 'Saved'}</button>
                             <button onClick={remove} className="py-2 px-3 text-red-400 text-xs underline">Delete</button>
                         </div>
@@ -3592,7 +3722,7 @@ service cloud.firestore {
                     <div className="grid grid-cols-1 lg:grid-cols-12 gap-4">
                         <div className="lg:col-span-7 bento-card">
                             <div className="text-sm font-bold text-gold mb-2 min-h-[1.25rem]">{anim ? `Previewing step ${anim.k + 1}` : hint}</div>
-                            <PlayCourtSVG play={vp} k={anim ? anim.k : k} t={anim ? anim.t : null} selected={anim ? null : actor} onCourtTap={anim ? null : onCourtTap} onPlayerTap={anim ? null : onPlayerTap} dragMode={dragMode} onDragDone={onDragDone} onBend={anim || isSetup ? null : onBend} />
+                            <PlayCourtSVG play={vp} k={anim ? anim.k : k} t={anim ? anim.t : null} selected={anim ? null : actor} onCourtTap={anim ? null : onCourtTap} onPlayerTap={anim ? null : onPlayerTap} dragMode={dragMode} onDragDone={onDragDone} onBend={anim || isSetup || tl === 'defense' ? null : onBend} onDefDragDone={!anim && hasD && (isSetup || tl === 'defense') ? onDefDragDone : null} />
                         </div>
 
                         <div className="lg:col-span-5 space-y-3">
@@ -3610,6 +3740,14 @@ service cloud.firestore {
                                 </div>
                                 <textarea rows="2" className="w-full bg-black border border-zinc-700 p-2 rounded text-white text-sm" placeholder="One-line summary (when we run it)" value={draft.summary} onChange={e => change(d => { d.summary = e.target.value; })} />
                                 <input className="w-full bg-black border border-zinc-700 p-2 rounded text-white text-sm" placeholder="Video link (optional: unlisted YouTube or Google Drive)" value={draft.video || ''} onChange={e => change(d => { d.video = e.target.value.trim(); })} />
+                                {/* NEW: defense. Shows red X's so reads can show what the defense does. */}
+                                <label className="flex items-center gap-2 text-sm"><span className="text-zinc-400 whitespace-nowrap">Defense</span>
+                                    <select className="flex-1 bg-black border border-zinc-700 p-2 rounded text-white text-sm" value={hasD ? draft.defense.type : 'none'} onChange={e => setDefense(e.target.value)}>
+                                        <option value="none">None</option>
+                                        <option value="man">Man-to-man (X's stay with their player)</option>
+                                        <option value="zone">Zone (X's hold their spots)</option>
+                                    </select>
+                                </label>
                             </div>
 
                             <div className="bento-card space-y-3">
@@ -3639,18 +3777,31 @@ service cloud.firestore {
 
                                 {isSetup ? (
                                     <div className="space-y-2">
-                                        <div className="text-xs text-zinc-400">Place all five players where they start.</div>
+                                        <div className="text-xs text-zinc-400">Place all five players where they start.{hasD ? ' Drag the red X\'s to place the defense.' : ''}</div>
+                                        {hasD && draft.defense.start && <button onClick={() => change(d => { delete d.defense.start; })} className="text-xs underline text-zinc-400">Reset the defense to its default spots</button>}
                                         <div className="flex items-center gap-2 text-sm"><span className="text-zinc-400">Ball starts with</span>
                                             {[1, 2, 3, 4, 5].map(p => <button key={p} onClick={() => change(d => { d.ball = p; })} className={`w-9 h-9 rounded-full font-black ${draft.ball === p ? 'bg-orange-500 text-black' : 'bg-zinc-800'}`}>{p}</button>)}
                                         </div>
                                     </div>
                                 ) : (
                                     <div className="space-y-2">
-                                        <div className="grid grid-cols-5 gap-1">
-                                            {['cut', 'dribble', 'screen', 'pass', 'shot'].map(tl => <button key={tl} onClick={() => { setTool(tl); setActor(null); }} className={`py-2 rounded font-black uppercase text-xs ${tool === tl ? 'bg-gold text-black' : 'bg-zinc-800 text-zinc-300'}`}>{tl}</button>)}
+                                        <div className={`grid ${hasD ? 'grid-cols-6' : 'grid-cols-5'} gap-1`}>
+                                            {['cut', 'dribble', 'screen', 'pass', 'shot', ...(hasD ? ['defense'] : [])].map(x => <button key={x} onClick={() => { setTool(x); setActor(null); }} className={`py-2 rounded font-black uppercase text-xs ${tl === x ? (x === 'defense' ? 'bg-red-600 text-white' : 'bg-gold text-black') : (x === 'defense' ? 'bg-zinc-800 text-red-400' : 'bg-zinc-800 text-zinc-300')}`}>{x === 'defense' ? 'D move' : x}</button>)}
                                         </div>
                                         <div className="space-y-1">
-                                            {(step.moves || []).length === 0 && <div className="text-xs text-zinc-500 italic">No moves yet. Pick an action above, then tap on the court.</div>}
+                                            {(step.moves || []).length === 0 && !(step.dmoves || []).length && <div className="text-xs text-zinc-500 italic">No moves yet. Pick an action above, then tap on the court.</div>}
+                                            {hasD && (step.dmoves || []).map((m, i) => (
+                                                <div key={'d' + i} className="flex justify-between items-center gap-2 text-sm bg-red-950/40 border border-red-900/50 rounded px-2 py-1.5">
+                                                    <span className="text-red-300">X{m.p} moves to the spot shown</span>
+                                                    <span className="flex items-center gap-2">
+                                                        {draft.defense.type === 'man' && <label className="text-xs text-zinc-400 flex items-center gap-1">then guards
+                                                            <select className="bg-black border border-zinc-700 rounded px-1 py-0.5 text-white" value={m.on || PB_DEF.at(vp, k).on[m.p]} onChange={e => change(d => { const x = S(d)[k].dmoves[i]; if (+e.target.value === PB_DEF.at(vpOf(d), k).on[x.p]) delete x.on; else x.on = +e.target.value; })}>
+                                                                {[1, 2, 3, 4, 5].map(n => <option key={n} value={n}>{n}</option>)}
+                                                            </select></label>}
+                                                        <button onClick={() => change(d => { S(d)[k].dmoves.splice(i, 1); })} className="text-zinc-500 hover:text-red-400"><Icon name="close" /></button>
+                                                    </span>
+                                                </div>
+                                            ))}
                                             {(step.moves || []).map((m, i) => (
                                                 <div key={i} className="flex justify-between items-center text-sm bg-black/40 rounded px-2 py-1.5">
                                                     <span>{m.type === 'shot' ? `${m.p} shoots` : m.type === 'pass' ? `${m.from} passes to ${m.to}` : `${m.p} ${PB_MOVE_LABEL[m.type]} the spot shown${m.bend || (m.path && m.path.length) ? ' (curved)' : ''}`}</span>
